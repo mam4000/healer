@@ -1,0 +1,34 @@
+name: Build HEALER image
+
+on:
+  push:
+    branches:
+      - codex/cloud-run-multi-user
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  submit-cloud-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: bcquery
+          workload_identity_provider: projects/965289355092/locations/global/workloadIdentityPools/healer-github/providers/healer-repo
+          service_account: healer-github-build@bcquery.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Submit the pushed revision to Cloud Build
+        env:
+          IMAGE: us-west1-docker.pkg.dev/bcquery/healer/healer:git-${{ github.sha }}
+        run: |
+          gcloud builds submit "https://github.com/mam4000/healer" \
+            --git-source-revision="${GITHUB_SHA}" \
+            --config="deploy/cloudbuild.yaml" \
+            --substitutions="_IMAGE=${IMAGE}" \
+            --async
