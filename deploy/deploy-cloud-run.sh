@@ -63,7 +63,16 @@ for SERVICE_ACCOUNT in "$WEB_SA" "$WORKER_SA"; do
     --member="serviceAccount:$SERVICE_ACCOUNT" --role=roles/storage.objectViewer >/dev/null
 done
 
-gcloud builds submit "$ROOT_DIR" --config="$ROOT_DIR/deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
+# A public Git URL lets Cloud Build fetch the checked-in source directly on
+# Google infrastructure, avoiding a local source-archive upload.  Keep the
+# local mode as a useful fallback for private, unpushed work.
+if [[ -n "${BUILD_SOURCE_REPOSITORY:-}" ]]; then
+  gcloud builds submit "$BUILD_SOURCE_REPOSITORY" \
+    --git-source-revision="${BUILD_SOURCE_REVISION:-main}" \
+    --config="deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
+else
+  gcloud builds submit "$ROOT_DIR" --config="$ROOT_DIR/deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
+fi
 
 COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_MAX_EVALS=2000,HEALER_LIMIT_MAX_PRODUCTS=100,HEALER_LIMIT_MAX_TOTAL=500,HEALER_LIMIT_N_COMP=10,HEALER_LIMIT_RETRO_DEPTH=1"
 BUILDING_BLOCK_ENV="HEALER_DATA_DIR=$BUILDING_BLOCK_MOUNT_PATH"
