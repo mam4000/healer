@@ -11,6 +11,7 @@ from healer.domain.bb_repository import (
     resolve_bb_path,
     get_repository,
     BBRepository,
+    ShardedBBRepository,
 )
 
 
@@ -98,6 +99,31 @@ def test_repository_cache_returns_same_object(test_bb_path: str):
     repo1 = get_repository(test_bb_path)
     repo2 = get_repository(test_bb_path)
     assert repo1 is repo2
+
+
+def test_sharded_repository_streams_one_processed_sdf_at_a_time(tmp_path):
+    """The sharded repository filters while iterating and never needs load()."""
+    from rdkit import Chem
+
+    shard = tmp_path / "part_processed.sdf"
+    writer = Chem.SDWriter(str(shard))
+    compatible = Chem.MolFromSmiles("CCN")
+    compatible.SetProp("rxn_annotations", '{"wanted": []}')
+    incompatible = Chem.MolFromSmiles("CCO")
+    incompatible.SetProp("rxn_annotations", '{"other": []}')
+    writer.write(compatible)
+    writer.write(incompatible)
+    writer.close()
+
+    class Reaction:
+        name = "wanted"
+
+    repo = ShardedBBRepository(str(tmp_path))
+    bbs = list(repo.iter_bbs_for_reactions([Reaction()]))
+    assert repo.is_loaded
+    assert repo.loaded_count == 0
+    assert len(bbs) == 1
+    assert bbs[0].get_smiles() == "CCN"
 
 
 def test_repository_get_bbs_for_all_reactions(test_bb_repository: BBRepository):

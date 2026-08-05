@@ -1,0 +1,20 @@
+# Source sent to Cloud Build. Docker performs a second context filter using
+# .dockerignore; this prevents local environments and generated assets from
+# being uploaded to Google in the first place.
+.gcloudignore
+.git
+.gitignore
+.dockerignore
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__/
+*.py[cod]
+.env
+deploy/cloud-run.env
+external/
+benchmark/
+notebooks/
+tests/
+healer/web/static/
+web_client/node_modules/

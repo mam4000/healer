@@ -35,7 +35,7 @@ function App() {
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [results, setResults] = useState<EnumerationResult[]>([]);
   const [isMultiFragment, setIsMultiFragment] = useState(false);
-  const [serverMode, setServerMode] = useState<'celery' | 'local'>('local');
+  const [serverMode, setServerMode] = useState<'tasks' | 'local'>('local');
   
   const [molRefData, setMolRefData] = useState<MolReferenceData | null>(null);
   const [showIndices, setShowIndices] = useState(true);

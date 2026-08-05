@@ -36,7 +36,8 @@ dependencies = [
 web = [
     "fastapi",
     "uvicorn[standard]",
-    "celery[redis]",
+    "redis",
+    "google-cloud-tasks",
 ]
 opt = [
     "pygad",

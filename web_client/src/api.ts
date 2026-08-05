@@ -90,7 +90,7 @@ export const cancelJob = async (jobId: string) => {
 };
 
 export const getServerMode = async () => {
-    const res = await api.get<{ mode: 'celery' | 'local' }>('/info/mode');
+    const res = await api.get<{ mode: 'tasks' | 'local' }>('/info/mode');
     return res.data.mode;
 };
 

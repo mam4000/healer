@@ -5,6 +5,7 @@ All tests run in LOCAL mode: HEALER_SERVER_MODE is not set / set to 'false',
 so jobs run synchronously and results are available immediately after the POST.
 """
 import os
+import asyncio
 import pytest
 
 # Force local mode before any healer imports so the routes module sees the
@@ -12,8 +13,11 @@ import pytest
 os.environ.setdefault("HEALER_SERVER_MODE", "false")
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 from healer.web.app import app
+import healer.web.routes as routes
+from healer.web.models import MoleculeRequest
 
 # ---------------------------------------------------------------------------
 # Shared client fixture
@@ -184,3 +188,29 @@ def test_cancel_nonexistent_job_local_mode(client: TestClient):
     """In local mode, cancelling a nonexistent job returns 400."""
     resp = client.post("/api/jobs/nonexistent-job-id/cancel")
     assert resp.status_code == 400
+
+
+def test_server_submission_applies_limits_before_task_creation(monkeypatch):
+    """The asynchronous path limits the payload before creating a Cloud Task."""
+    captured = {}
+
+    def fake_create(job_id, job_type, params):
+        captured["job_id"] = job_id
+        captured["job_type"] = job_type
+        captured.update(params)
+
+    monkeypatch.setattr(routes, "USE_CELERY", True)
+    monkeypatch.setattr(routes, "task_name_for", lambda job_id: f"tasks/{job_id}")
+    monkeypatch.setattr(routes.job_store, "create", lambda *args: None)
+    monkeypatch.setattr(routes, "create_enumeration_task", fake_create)
+    monkeypatch.setattr(routes, "apply_server_limits", lambda params, _: {
+        **params,
+        "max_total_products": 500,
+    })
+
+    response = asyncio.run(routes.submit_molecule_enumeration(MoleculeRequest(
+        molecule="CCO", reaction_tags=["amide"], max_total_products=None,
+    )))
+
+    assert response.job_id == captured["job_id"]
+    assert captured["max_total_products"] == 500

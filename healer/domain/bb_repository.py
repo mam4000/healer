@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 _HEALER_PKG = Path(__file__).parent.parent
 _DATA_DIR = _HEALER_PKG / "data"
 _BB_DIR = Path(os.getenv("HEALER_DATA_DIR", str(_DATA_DIR / "buildingblocks")))
+MOLPORT_FULL_SOURCE = "molport_full"
+_MOLPORT_SUBDIR = "Molport_Full_Database"
 
 # Named short-keys → subdirectory patterns, resolved against _BB_DIR.
 # Keeping this here so the CLI (which calls resolve_bb_path directly) also
@@ -49,6 +51,12 @@ def resolve_bb_path(bb_source: str) -> str:
         Raises:
             FileNotFoundError: If no file matches the pattern.
     """
+    if bb_source == MOLPORT_FULL_SOURCE:
+        shard_dir = _BB_DIR / _MOLPORT_SUBDIR
+        if not any(shard_dir.glob("*_processed.sdf")):
+            raise FileNotFoundError(f"No processed Molport shards found in {shard_dir}")
+        return MOLPORT_FULL_SOURCE
+
     pattern = _build_bb_paths().get(bb_source, bb_source)
     p = Path(pattern)
 
@@ -272,12 +280,68 @@ class BBRepository:
         self._supplier = SDMolSupplier(self.source_path, sanitize=True)
 
 
+@dataclass
+class ShardedBBRepository:
+    """A read-through repository for a catalog stored as processed SDF shards.
+
+    Unlike :class:`BBRepository`, this class never indexes or retains the whole
+    catalog.  Each call opens one SDF shard at a time and yields compatible
+    building blocks.  Consumers must keep their own bounded result set.
+    """
+
+    source_dir: str
+
+    @property
+    def is_loaded(self) -> bool:
+        # There is deliberately no eager load for a sharded catalog.
+        return True
+
+    @property
+    def total_count(self) -> int:
+        return 0
+
+    @property
+    def loaded_count(self) -> int:
+        return 0
+
+    def __len__(self) -> int:
+        return 0
+
+    def load(self, show_progress: bool = True) -> "ShardedBBRepository":
+        return self
+
+    def shard_paths(self) -> List[Path]:
+        return sorted(Path(self.source_dir).glob("*_processed.sdf"))
+
+    def iter_bbs_for_reactions(
+        self, reactions: List[ReactionTemplate21]
+    ) -> Iterator[BuildingBlock]:
+        reaction_names = {reaction.name for reaction in reactions}
+        for shard_path in self.shard_paths():
+            logger.info("Streaming Molport building-block shard: %s", shard_path.name)
+            supplier = SDMolSupplier(str(shard_path), sanitize=True)
+            for mol in supplier:
+                if mol is None:
+                    continue
+                bb = BuildingBlock(mol)
+                annotations = bb.get_parsed_prop("rxn_annotations")
+                if isinstance(annotations, dict) and reaction_names.intersection(annotations):
+                    yield bb
+
+    def get_bbs_for_reactions(
+        self, reactions: List[ReactionTemplate21]
+    ) -> List[BuildingBlock]:
+        raise RuntimeError(
+            "Molport is a streaming source. Use iter_bbs_for_reactions() and retain a bounded result set."
+        )
+
+
 ##### Module-Level Cache for Session-Wide Sharing #####
 
-_REPOSITORY_CACHE: Dict[str, BBRepository] = {}
+_REPOSITORY_CACHE: Dict[str, Any] = {}
 
 
-def get_repository(bb_source: str) -> BBRepository:
+def get_repository(bb_source: str) -> Any:
     """
         Get or create a BBRepository for the given source.
         
@@ -292,6 +356,12 @@ def get_repository(bb_source: str) -> BBRepository:
             A BBRepository instance (possibly cached).
     """
     resolved_path = resolve_bb_path(bb_source)
+
+    if resolved_path == MOLPORT_FULL_SOURCE:
+        source_dir = str(_BB_DIR / _MOLPORT_SUBDIR)
+        if resolved_path not in _REPOSITORY_CACHE:
+            _REPOSITORY_CACHE[resolved_path] = ShardedBBRepository(source_dir=source_dir)
+        return _REPOSITORY_CACHE[resolved_path]
     
     if resolved_path not in _REPOSITORY_CACHE:
         _REPOSITORY_CACHE[resolved_path] = BBRepository(source_path=resolved_path)
@@ -307,4 +377,3 @@ def clear_repository_cache() -> None:
         to free memory.
     """
     _REPOSITORY_CACHE.clear()
-

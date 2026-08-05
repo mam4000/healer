@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import healer.web.interface as interface
 from healer.web.interface import discover_building_blocks, resolve_bb_path, BB_BASE_PATH
 from healer.domain.bb_repository import resolve_bb_path as repo_resolve_bb_path
 
@@ -56,6 +57,21 @@ def test_discover_test_entry_has_expected_label():
         assert test_entries[0]["label"] == "Test Set (100 BBs)"
 
 
+def test_discover_groups_molport_shards_into_one_logical_source(tmp_path, monkeypatch):
+    molport_dir = tmp_path / "Molport_Full_Database"
+    molport_dir.mkdir()
+    (molport_dir / "first_processed.sdf").touch()
+    (molport_dir / "second_processed.sdf").touch()
+    monkeypatch.setattr(interface, "BB_BASE_PATH", tmp_path)
+
+    result = interface.discover_building_blocks()
+    assert result == [{
+        "value": "molport_full",
+        "label": "Molport Full Database",
+        "key": "molport_full",
+    }]
+
+
 # ---------------------------------------------------------------------------
 # resolve_bb_path (interface layer)
 # ---------------------------------------------------------------------------
@@ -99,3 +115,32 @@ def test_repo_resolve_named_key_test():
 def test_repo_resolve_nonexistent_raises():
     with pytest.raises(FileNotFoundError):
         repo_resolve_bb_path("/does/not/exist.sdf")
+
+
+def test_server_limits_cap_omitted_and_excessive_work(monkeypatch):
+    """Shared server callers cannot bypass limits by omitting optional values."""
+    monkeypatch.setattr(interface, "SERVER_MODE", True)
+    limited = interface.apply_server_limits({
+        "reaction_tags": ["amide", "C-N"],
+        "max_evals_per_comp": None,
+        "max_products_per_comp": 999999,
+        "max_total_products": None,
+        "sim_threshold": 0.0,
+        "max_bbs_per_frag": -1,
+        "n_compositions": 999,
+        "retro_tree_depth": 99,
+        "min_frag_size": 1,
+    })
+
+    assert limited["max_evals_per_comp"] == interface.SERVER_LIMITS["max_evals_per_comp"]
+    assert limited["max_products_per_comp"] == interface.SERVER_LIMITS["max_products_per_comp"]
+    assert limited["max_total_products"] == interface.SERVER_LIMITS["max_total_products"]
+    assert limited["n_compositions"] == interface.SERVER_LIMITS["n_compositions_max"]
+    assert limited["retro_tree_depth"] == interface.SERVER_LIMITS["retro_depth_max"]
+    assert limited["min_frag_size"] == interface.SERVER_LIMITS["min_frag_size_min"]
+
+
+def test_server_limits_reject_all_reaction_tag(monkeypatch):
+    monkeypatch.setattr(interface, "SERVER_MODE", True)
+    with pytest.raises(ValueError, match="unavailable"):
+        interface.apply_server_limits({"reaction_tags": ["all"]})

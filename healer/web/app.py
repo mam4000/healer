@@ -26,6 +26,7 @@ def _create_app():
     """Create and configure the FastAPI application."""
     import healer.utils.rdkit_monkey_patch  # noqa: F401
     from healer.web.routes import router
+    from healer.web.worker_routes import router as worker_router
 
     app = FastAPI(title="HEALER Web API")
 
@@ -59,6 +60,7 @@ def _create_app():
     )
 
     app.include_router(router)
+    app.include_router(worker_router)
 
     @app.get("/api/health")
     async def health_check():

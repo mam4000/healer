@@ -16,6 +16,7 @@ ENV/
 # Environment files (keep .env.example, ignore .env)
 .env
 !.env.example
+deploy/cloud-run.env
 
 # IDE / Editor
 .vscode/

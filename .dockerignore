@@ -1,0 +1,14 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+.env
+deploy/cloud-run.env
+external
+benchmark
+notebooks
+tests
+# Rebuilt from web_client in the frontend stage.
+healer/web/static

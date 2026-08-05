@@ -32,6 +32,7 @@ _BB_NAMED_SOURCES: Dict[str, Dict[str, str]] = {
     "EU_stock":     {"subdir": "Enamine_Rush-Delivery_Building_Blocks-EU", "label": "Enamine EU Stock"},
     "Global_stock": {"subdir": "Enamine_Building_Blocks_Stock",            "label": "Enamine Global Stock"},
     "test":         {"subdir": None,                                        "label": "Test Set (100 BBs)"},
+    "molport_full": {"subdir": "Molport_Full_Database",                    "label": "Molport Full Database"},
 }
 
 # Fallback pretty-name lookup for any extra SDF files found by rglob
@@ -40,18 +41,19 @@ _EXTRA_PRETTY_NAMES: Dict[str, str] = {}
 
 SERVER_MODE = os.environ.get('HEALER_SERVER_MODE', 'false').lower() == 'true'
 
-# Default limits for server mode (can be overridden via env vars)
+# Default limits for server mode (can be overridden via env vars). These defaults
+# are deliberately conservative for a shared, CPU-bound web service.
 SERVER_LIMITS = {
-    'max_evals_per_comp': int(os.environ.get('HEALER_LIMIT_MAX_EVALS', 10000)),
-    'max_products_per_comp': int(os.environ.get('HEALER_LIMIT_MAX_PRODUCTS', 500)),
-    'max_total_products': int(os.environ.get('HEALER_LIMIT_MAX_TOTAL', 5000)),
+    'max_evals_per_comp': int(os.environ.get('HEALER_LIMIT_MAX_EVALS', 2000)),
+    'max_products_per_comp': int(os.environ.get('HEALER_LIMIT_MAX_PRODUCTS', 100)),
+    'max_total_products': int(os.environ.get('HEALER_LIMIT_MAX_TOTAL', 500)),
     'sim_threshold_min': float(os.environ.get('HEALER_LIMIT_SIM_MIN', 0.5)),
     'sim_threshold_max': float(os.environ.get('HEALER_LIMIT_SIM_MAX', 1.0)),
     'max_bbs_per_frag': int(os.environ.get('HEALER_LIMIT_MAX_BBS', 10)),
-    'n_compositions_max': int(os.environ.get('HEALER_LIMIT_N_COMP', 50)),
-    'retro_depth_max': int(os.environ.get('HEALER_LIMIT_RETRO_DEPTH', 2)),
+    'n_compositions_max': int(os.environ.get('HEALER_LIMIT_N_COMP', 10)),
+    'retro_depth_max': int(os.environ.get('HEALER_LIMIT_RETRO_DEPTH', 1)),
     'min_frag_size_min': int(os.environ.get('HEALER_LIMIT_MIN_FRAG', 7)),
-    'max_reaction_tags': int(os.environ.get('HEALER_LIMIT_MAX_RXN_TAGS', 10)),
+    'max_reaction_tags': int(os.environ.get('HEALER_LIMIT_MAX_RXN_TAGS', 8)),
 }
 
 
@@ -61,20 +63,25 @@ def get_server_limits() -> Dict[str, Any]:
 
 
 def apply_server_limits(params: Dict[str, Any], healer_type: str = "molecule") -> Dict[str, Any]:
-    """Apply server limits to parameters if in server mode."""
+    """Apply non-bypassable parameter limits when serving shared users."""
     if not SERVER_MODE:
         return params
     
     limited = params.copy()
     
-    if 'max_evals_per_comp' in limited and limited['max_evals_per_comp']:
-        limited['max_evals_per_comp'] = min(limited['max_evals_per_comp'], SERVER_LIMITS['max_evals_per_comp'])
-    
-    if 'max_products_per_comp' in limited and limited['max_products_per_comp']:
-        limited['max_products_per_comp'] = min(limited['max_products_per_comp'], SERVER_LIMITS['max_products_per_comp'])
-    
-    if 'max_total_products' in limited and limited['max_total_products']:
-        limited['max_total_products'] = min(limited['max_total_products'], SERVER_LIMITS['max_total_products'])
+    for key, limit_key in (
+        ('max_evals_per_comp', 'max_evals_per_comp'),
+        ('max_products_per_comp', 'max_products_per_comp'),
+        ('max_total_products', 'max_total_products'),
+    ):
+        # None previously meant unlimited, which let clients bypass the limit.
+        value = limited.get(key)
+        limited[key] = SERVER_LIMITS[limit_key] if value is None else min(value, SERVER_LIMITS[limit_key])
+
+    tags = [tag for tag in limited.get('reaction_tags', []) if tag.strip()]
+    if any(tag.lower() == 'all' for tag in tags):
+        raise ValueError("The 'all' reaction tag is unavailable in server mode")
+    limited['reaction_tags'] = tags[:SERVER_LIMITS['max_reaction_tags']]
     
     if healer_type in ('molecule', 'fragment'):
         if 'sim_threshold' in limited:
@@ -125,6 +132,14 @@ def discover_building_blocks() -> List[Dict[str, str]]:
             if not target_dir.exists():
                 continue
             matches = sorted(target_dir.glob("*_processed.sdf"))
+
+        if key == "molport_full":
+            if matches:
+                # The value is a logical source key, not a particular shard:
+                # the worker opens one matching SDF at a time.
+                options.append({"value": key, "label": info["label"], "key": key})
+                seen_paths.update(str(sdf_path.resolve()) for sdf_path in matches)
+            continue
 
         for sdf_path in matches:
             abs_path = str(sdf_path.resolve())
@@ -250,6 +265,7 @@ def create_site_healer(
         reaction_tags=reaction_tags,
         rules=rules,
         struct_rules=struct_rules,
+        max_bbs=SERVER_LIMITS['max_bbs_per_frag'] if SERVER_MODE else 10,
         shuffle_bb_order=shuffle_bb_order,
         verbose=verbose
     )

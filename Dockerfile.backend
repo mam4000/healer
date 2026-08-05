@@ -78,5 +78,6 @@ RUN useradd -m -u 1000 healer
 
 USER healer
 
-CMD ["uvicorn", "healer.web.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "8"]
-
+# Cloud Run injects PORT at runtime. A single worker is intentional: enumeration
+# work is CPU and memory intensive, so concurrency is handled by Celery workers.
+CMD ["sh", "-c", "exec uvicorn healer.web.app:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]

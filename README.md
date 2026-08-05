@@ -217,17 +217,12 @@ Open http://localhost:8000 in your browser.
 
 ### Server Mode (Production)
 
-For deployments with multiple users, use Celery/Redis for async job processing:
+For deployments with multiple users, use Cloud Tasks and a request-driven Cloud Run worker service:
 
 ```bash
-# Terminal 1: Redis
-redis-server
-
-# Terminal 2: Celery worker
-celery -A healer.web.celery_worker worker --loglevel=info
-
-# Terminal 3: Backend
-HEALER_SERVER_MODE=true healer-ui
+Set `HEALER_SERVER_MODE=true` and configure the Cloud Tasks environment variables.
+The API queues work in Cloud Tasks, which invokes the authenticated worker service
+on demand; Redis retains job state and results.
 ```
 
 See [web_client/README.md](web_client/README.md) for development setup.

@@ -1,4 +1,6 @@
 import abc
+import heapq
+import hashlib
 import logging
 from pathlib import Path
 from typing import List, Union, Dict, Tuple, Any, Optional, Iterator, Iterable
@@ -19,7 +21,7 @@ from healer.application.optimizers import BaseStagewiseOptimizer, BaseSequenceOp
 from healer.domain.building_block import BuildingBlock
 from healer.domain.reaction_template import ReactionTemplate21
 from healer.domain.enumeration_record import EnumerationRecord
-from healer.domain.bb_repository import BBRepository, get_repository
+from healer.domain.bb_repository import BBRepository, ShardedBBRepository, get_repository
 import healer.utils.utils as utils
 
 
@@ -130,8 +132,10 @@ class _BaseHEALER(abc.ABC):
 
         # Optional shuffling (creates a shuffled index, not a copy)
         self._bb_shuffle_indices: Optional[np.ndarray] = None
-        if shuffle_bb_order:
+        if shuffle_bb_order and not isinstance(self._bb_repo, ShardedBBRepository):
             self._bb_shuffle_indices = np.random.permutation(len(self._bb_repo))
+        elif shuffle_bb_order:
+            logger.warning("shuffle_bb_order is ignored for streaming building-block sources")
 
         # Fingerprint generator
         self._fp_generator = get_fingerprint_generator()
@@ -668,6 +672,7 @@ class SiteHEALER(_BaseHEALER):
                 'Chiral': (0, 5), # number of chiral centers
             },
             struct_rules: list[str]=[],
+            max_bbs: int = 10,
             verbose: int=1,
     ):
         '''
@@ -685,6 +690,7 @@ class SiteHEALER(_BaseHEALER):
         super().__init__(bb_source, reaction_tags, bb_repository, shuffle_bb_order, verbose)
         self.rules = rules
         self.struct_rules = struct_rules
+        self.max_bbs = max_bbs
     
     def set_rules(self, **kwargs):
         '''
@@ -754,6 +760,35 @@ class SiteHEALER(_BaseHEALER):
 
     def _process_building_blocks(self) -> None:
         '''Filter building blocks based on the rules and structure-based rules.'''
+        if isinstance(self._bb_repo, ShardedBBRepository):
+            if self.max_bbs <= 0:
+                raise ValueError("Streaming building-block sources require max_bbs to be positive")
+            # Keep a deterministic, bounded sample across all shards.  A site
+            # search has no similarity score to rank by, so a stable hash avoids
+            # favouring the first file in catalog order.
+            selected: List[Tuple[str, BuildingBlock]] = []
+            for bb in self._bb_repo.iter_bbs_for_reactions(self.reactions):
+                try:
+                    if not (self._check_rules(bb) and self._check_struct_rules(bb)):
+                        continue
+                    rank = hashlib.sha256(bb.get_smiles().encode()).hexdigest()
+                    if len(selected) < self.max_bbs:
+                        selected.append((rank, bb))
+                    else:
+                        worst_idx = max(range(len(selected)), key=lambda i: selected[i][0])
+                        if rank < selected[worst_idx][0]:
+                            selected[worst_idx] = (rank, bb)
+                finally:
+                    bb.evict()
+            filtered_bbs = [bb for _, bb in sorted(selected)]
+            self._compositions = [
+                CompositionWithBBs(
+                    comp=comp,
+                    fragment_bbs=([BuildingBlock(comp.fragments[0])], filtered_bbs),
+                ) for comp in self._compositions
+            ]
+            return
+
         bb_mols = self.bb_mols
         filtered_bbs = []
         for bb in bb_mols:
@@ -975,6 +1010,10 @@ class MoleculeHEALER(_BaseHEALER):
             to the query molecule and the number of building blocks per composition 
             if given.
         '''
+        if isinstance(self._bb_repo, ShardedBBRepository):
+            self._process_sharded_building_blocks(bb_chunk_size)
+            return
+
         bb_mols = self.bb_mols
         bb_sizes = np.array([bb.num_heavy_atoms for bb in bb_mols])
         bb_fps = [bb.fingerprint for bb in bb_mols]
@@ -1017,6 +1056,66 @@ class MoleculeHEALER(_BaseHEALER):
                     [bb for bb, keep in zip(bb_mols, row) if keep] for row in comp_mask
                 ))
             for comp, comp_mask in zip(orig_comps, masks_per_comp)
+        ]
+
+    def _process_sharded_building_blocks(self, bb_chunk_size: int=1000) -> None:
+        """Keep global top-k candidates while streaming Molport SDF shards.
+
+        This intentionally requires a positive ``max_bbs_per_frag``: an
+        unbounded threshold result would again put the entire catalog in memory.
+        The web service enforces a positive value for shared requests.
+        """
+        if self.max_bbs_per_frag <= 0:
+            raise ValueError(
+                "Streaming building-block sources require max_bbs_per_frag to be positive"
+            )
+
+        frag_lists = [path.fragments for path in self._compositions]
+        offsets = np.concatenate(([0], np.cumsum([len(frag_list) for frag_list in frag_lists])))
+        frags = [frag for frag_list in frag_lists for frag in frag_list]
+        if not frags:
+            return
+        frag_sizes = np.array([frag.GetNumHeavyAtoms() for frag in frags])[:, None]
+        frag_fps = self._get_fingerprints(frags)
+        # Entries include a sequence number, so tied scores never compare BBs.
+        heaps: List[List[Tuple[float, int, BuildingBlock]]] = [[] for _ in frags]
+        sequence = 0
+
+        for batch in _chunked(self._bb_repo.iter_bbs_for_reactions(self.reactions), bb_chunk_size):
+            batch_sizes = np.array([bb.num_heavy_atoms for bb in batch])
+            for bb in batch:
+                bb.fingerprint = self._fp_generator.GetFingerprint(bb.mol)
+            batch_fps = [bb.fingerprint for bb in batch]
+            delta = batch_sizes[None, :] - frag_sizes
+            weights = 1 - np.clip(delta, 0, None) / batch_sizes[None, :]
+            scores = weights * utils.get_batch_tversky_sims(frag_fps, batch_fps)
+
+            for frag_idx, row in enumerate(scores):
+                heap = heaps[frag_idx]
+                for bb_idx, score in enumerate(row):
+                    entry = (float(score), sequence, batch[bb_idx])
+                    sequence += 1
+                    if len(heap) < self.max_bbs_per_frag:
+                        heapq.heappush(heap, entry)
+                    elif score > heap[0][0]:
+                        heapq.heapreplace(heap, entry)
+            # Only retained candidates keep a lazily reconstructable molecule.
+            retained_ids = {id(entry[2]) for heap in heaps for entry in heap}
+            for bb in batch:
+                if id(bb) not in retained_ids:
+                    bb.evict()
+
+        selected_per_fragment = [
+            [entry[2] for entry in sorted(heap, key=lambda entry: entry[0], reverse=True)]
+            for heap in heaps
+        ]
+        original_comps = self._compositions
+        self._compositions = [
+            CompositionWithBBs(
+                comp=comp,
+                fragment_bbs=tuple(selected_per_fragment[offsets[i]:offsets[i + 1]]),
+            )
+            for i, comp in enumerate(original_comps)
         ]
 
 
@@ -1099,4 +1198,3 @@ class FragmentHEALER(MoleculeHEALER):
         )
 
         logger.debug("Generated %d composition(s):\n%s", len(self._compositions), self._composition_prints())
-

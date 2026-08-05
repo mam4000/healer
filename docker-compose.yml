@@ -18,7 +18,7 @@ services:
       args:
         GA_ID: ${GA_ID:-GA_ID_PLACEHOLDER}
     image: healer:latest
-    command: uvicorn healer.web.app:app --host 0.0.0.0 --port 8000 --workers 8 --access-log
+    command: uvicorn healer.web.app:app --host 0.0.0.0 --port 8000 --workers 1 --access-log
     env_file:
       - path: .env
         required: false
@@ -41,22 +41,6 @@ services:
       retries: 3
       start_period: 60s
 
-  worker:
-    image: healer:latest
-    command: celery -A healer.web.celery_worker.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4} --time-limit=300
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      # These override any same-named vars from .env
-      - HEALER_REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0
-      - HEALER_DATA_DIR=/buildingblocks
-    volumes:
-      - ${HEALER_DATA_DIR:-./healer/data/buildingblocks}:/buildingblocks:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
 
   frontend:
     build:
