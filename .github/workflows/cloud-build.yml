@@ -13,6 +13,10 @@ jobs:
   submit-cloud-build:
     runs-on: ubuntu-latest
     steps:
+      # This checkout supplies Cloud Build's configuration file only. The
+      # source passed to `gcloud builds submit` below is fetched by Google.
+      - uses: actions/checkout@v4
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
         with:
