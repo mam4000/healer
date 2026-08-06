@@ -314,10 +314,20 @@ class ShardedBBRepository:
         return sorted(Path(self.source_dir).glob("*_processed.sdf"))
 
     def iter_bbs_for_reactions(
-        self, reactions: List[ReactionTemplate21]
+        self, reactions: List[ReactionTemplate21], shard_name: Optional[str] = None
     ) -> Iterator[BuildingBlock]:
+        """Yield compatible blocks from all shards, or one named shard.
+
+        ``shard_name`` is deliberately a basename rather than an arbitrary
+        path: Cloud Tasks payloads are untrusted input and must not choose a
+        file outside the mounted Molport catalog.
+        """
         reaction_names = {reaction.name for reaction in reactions}
         shard_paths = self.shard_paths()
+        if shard_name is not None:
+            shard_paths = [path for path in shard_paths if path.name == shard_name]
+            if not shard_paths:
+                raise ValueError(f"Unknown Molport shard: {shard_name}")
         for shard_number, shard_path in enumerate(shard_paths, start=1):
             # Use WARNING intentionally: the Cloud Run service currently keeps
             # application warnings without enabling verbose module logging.

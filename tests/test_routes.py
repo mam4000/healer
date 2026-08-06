@@ -214,3 +214,34 @@ def test_server_submission_applies_limits_before_task_creation(monkeypatch):
 
     assert response.job_id == captured["job_id"]
     assert captured["max_total_products"] == 500
+
+
+def test_molport_submission_fans_out_one_task_per_shard(monkeypatch, tmp_path):
+    """A logical Molport source queues one child task for every processed shard."""
+    captured = {"children": []}
+
+    class Repository:
+        def shard_paths(self):
+            return [tmp_path / "a_processed.sdf", tmp_path / "b_processed.sdf"]
+
+    monkeypatch.setattr(routes, "USE_CELERY", True)
+    monkeypatch.setattr(routes, "apply_server_limits", lambda params, _: {**params, "max_bbs_per_frag": 2})
+    monkeypatch.setattr(routes, "ShardedBBRepository", Repository)
+    monkeypatch.setattr(routes, "get_repository", lambda _: Repository())
+    monkeypatch.setattr(routes.job_store, "create_fanout", lambda *args: captured.update(parent=args))
+    monkeypatch.setattr(routes, "molport_shard_task_name_for", lambda job_id, shard_id: f"tasks/{job_id}/{shard_id}")
+    monkeypatch.setattr(routes, "molport_merge_task_name_for", lambda job_id: f"tasks/{job_id}/merge")
+    monkeypatch.setattr(
+        routes,
+        "create_molport_shard_task",
+        lambda job_id, shard_id, shard_name, params: captured["children"].append((job_id, shard_id, shard_name, params)),
+    )
+
+    response = asyncio.run(routes.submit_molecule_enumeration(MoleculeRequest(
+        molecule="CCO", bb_source="molport_full", reaction_tags=["amide"], max_bbs_per_frag=2,
+    )))
+
+    assert len(captured["children"]) == 2
+    assert [child[2] for child in captured["children"]] == ["a_processed.sdf", "b_processed.sdf"]
+    assert captured["parent"][1]["0"].endswith("/0")
+    assert response.job_id == captured["parent"][0]

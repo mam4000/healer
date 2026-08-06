@@ -1118,6 +1118,110 @@ class MoleculeHEALER(_BaseHEALER):
             for i, comp in enumerate(original_comps)
         ]
 
+    @staticmethod
+    def _serialise_candidate(score: float, bb: BuildingBlock) -> Dict[str, Any]:
+        """Return the small, JSON-safe representation used between shard tasks."""
+        return {"score": float(score), "smiles": bb.get_smiles(), "props": bb.props}
+
+    @staticmethod
+    def _deserialise_candidate(candidate: Dict[str, Any]) -> BuildingBlock:
+        mol = Chem.MolFromSmiles(candidate["smiles"])
+        if mol is None:
+            raise ValueError("Invalid building-block SMILES in shard result")
+        bb = BuildingBlock(mol)
+        for name, value in candidate.get("props", {}).items():
+            bb.SetProp(name, value)
+        return bb
+
+    def select_molport_shard_candidates(self, shard_name: str, bb_chunk_size: int = 1000) -> List[List[Dict[str, Any]]]:
+        """Select deterministic local top-k candidates for one Molport shard.
+
+        The global top-k is contained in the union of every shard's local
+        top-k.  This is the bounded intermediate representation used by the
+        request-driven fan-out workers.
+        """
+        if not isinstance(self._bb_repo, ShardedBBRepository):
+            raise ValueError("Shard selection is only available for Molport")
+        if self.max_bbs_per_frag <= 0:
+            raise ValueError("Streaming building-block sources require max_bbs_per_frag to be positive")
+
+        self._process_query_mol()
+        fragments = [frag for path in self._compositions for frag in path.fragments]
+        if not fragments:
+            return []
+        frag_sizes = np.array([frag.GetNumHeavyAtoms() for frag in fragments])[:, None]
+        frag_fps = self._get_fingerprints(fragments)
+        selected: List[List[Tuple[float, BuildingBlock]]] = [[] for _ in fragments]
+
+        for batch in _chunked(
+            self._bb_repo.iter_bbs_for_reactions(self.reactions, shard_name=shard_name),
+            bb_chunk_size,
+        ):
+            batch_sizes = np.array([bb.num_heavy_atoms for bb in batch])
+            for bb in batch:
+                bb.fingerprint = self._fp_generator.GetFingerprint(bb.mol)
+            delta = batch_sizes[None, :] - frag_sizes
+            weights = 1 - np.clip(delta, 0, None) / batch_sizes[None, :]
+            scores = weights * utils.get_batch_tversky_sims(frag_fps, [bb.fingerprint for bb in batch])
+            for fragment_index, row in enumerate(scores):
+                pool = selected[fragment_index]
+                by_smiles = {candidate.get_smiles(): index for index, (_, candidate) in enumerate(pool)}
+                for bb_index, score in enumerate(row):
+                    bb = batch[bb_index]
+                    score_value = float(score)
+                    existing = by_smiles.get(bb.get_smiles())
+                    if existing is not None:
+                        if score_value > pool[existing][0]:
+                            pool[existing] = (score_value, bb)
+                        continue
+                    pool.append((score_value, bb))
+                    pool.sort(key=lambda item: (-item[0], item[1].get_smiles()))
+                    if len(pool) > self.max_bbs_per_frag:
+                        _, evicted = pool.pop()
+                        evicted.evict()
+                    by_smiles = {candidate.get_smiles(): index for index, (_, candidate) in enumerate(pool)}
+            retained_ids = {id(candidate) for pool in selected for _, candidate in pool}
+            for bb in batch:
+                if id(bb) not in retained_ids:
+                    bb.evict()
+
+        return [
+            [self._serialise_candidate(score, bb) for score, bb in pool]
+            for pool in selected
+        ]
+
+    def enumerate_from_molport_candidates(
+        self,
+        candidates_per_fragment: List[List[Dict[str, Any]]],
+        max_evals_per_comp: Optional[int] = None,
+        max_products_per_comp: Optional[int] = None,
+        max_total_products: Optional[int] = None,
+    ) -> None:
+        """Enumerate after fan-out has already selected global Molport top-k."""
+        self._process_query_mol()
+        original_comps = self._compositions
+        total_fragments = sum(len(comp.fragments) for comp in original_comps)
+        if len(candidates_per_fragment) != total_fragments:
+            raise ValueError("Shard results do not match the generated compositions")
+        offset = 0
+        self._compositions = []
+        for comp in original_comps:
+            count = len(comp.fragments)
+            self._compositions.append(
+                CompositionWithBBs(
+                    comp=comp,
+                    fragment_bbs=tuple(
+                        [self._deserialise_candidate(candidate) for candidate in candidates]
+                        for candidates in candidates_per_fragment[offset:offset + count]
+                    ),
+                )
+            )
+            offset += count
+        self.enumerated_molecules = [EnumerationRecord(product=self.query_mol, bbs=[], reaction_names=[], props={})]
+        self.enumerated_molecules += self._enumerate_base(
+            max_evals_per_comp, max_products_per_comp, max_total_products
+        )
+
 
 class FragmentHEALER(MoleculeHEALER):
     '''

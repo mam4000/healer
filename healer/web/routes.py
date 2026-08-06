@@ -32,7 +32,16 @@ from healer.web.interface import (
     apply_server_limits,
 )
 from healer.web import job_store
-from healer.web.cloud_tasks import TaskSubmissionError, create_enumeration_task, delete_task, task_name_for
+from healer.web.cloud_tasks import (
+    TaskSubmissionError,
+    create_enumeration_task,
+    create_molport_shard_task,
+    delete_task,
+    molport_merge_task_name_for,
+    molport_shard_task_name_for,
+    task_name_for,
+)
+from healer.domain.bb_repository import MOLPORT_FULL_SOURCE, ShardedBBRepository, get_repository
 from healer.utils import utils
 
 router = APIRouter(prefix="/api")
@@ -53,6 +62,31 @@ else:
 # ============================================================================
 
 _local_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
+    repo = get_repository(MOLPORT_FULL_SOURCE)
+    if not isinstance(repo, ShardedBBRepository):
+        raise RuntimeError("Molport repository is not configured as a sharded source")
+    shard_names = [path.name for path in repo.shard_paths()]
+    if not shard_names:
+        raise ValueError("No processed Molport shards are available")
+    shard_tasks = {
+        str(index): molport_shard_task_name_for(job_id, str(index))
+        for index in range(len(shard_names))
+    }
+    job_store.create_fanout(job_id, shard_tasks, molport_merge_task_name_for(job_id))
+    try:
+        for index, shard_name in enumerate(shard_names):
+            create_molport_shard_task(job_id, str(index), shard_name, params)
+    except Exception:
+        for task_name in shard_tasks.values():
+            try:
+                delete_task(task_name)
+            except TaskSubmissionError:
+                pass
+        job_store.update(job_id, status="FAILURE", phase="FAILED")
+        raise
 
 
 def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
@@ -92,9 +126,12 @@ async def submit_molecule_enumeration(request: MoleculeRequest):
         try:
             params = apply_server_limits(params, 'molecule')
             job_id = str(uuid.uuid4())
-            task_name = task_name_for(job_id)
-            job_store.create(job_id, task_name)
-            create_enumeration_task(job_id, 'molecule', params)
+            if params.get("bb_source") == MOLPORT_FULL_SOURCE:
+                _submit_molport_fanout(job_id, params)
+            else:
+                task_name = task_name_for(job_id)
+                job_store.create(job_id, task_name)
+                create_enumeration_task(job_id, 'molecule', params)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except (TaskSubmissionError, job_store.JobStoreUnavailableError) as exc:
@@ -141,7 +178,13 @@ async def get_job_status(job_id: str):
             raise HTTPException(status_code=503, detail="The job store is temporarily unavailable") from exc
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        response = JobStatusResponse(job_id=job_id, status=job["status"])
+        response = JobStatusResponse(
+            job_id=job_id,
+            status=job["status"],
+            completed_shards=len(job.get("completed_shards", [])) if "total_shards" in job else None,
+            total_shards=job.get("total_shards"),
+            phase=job.get("phase"),
+        )
         if job["status"] == "SUCCESS":
             response.result = JobResult(**job["result"])
         elif job["status"] == "FAILURE":
@@ -171,8 +214,13 @@ async def cancel_job(job_id: str):
             job = job_store.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail="Job not found")
-            if job["status"] == "PENDING":
-                delete_task(job["task_name"])
+            task_names = list(job.get("task_names", {}).values())
+            if "task_name" in job:
+                task_names.append(job["task_name"])
+            if job.get("merge_task_name"):
+                task_names.append(job["merge_task_name"])
+            for task_name in task_names:
+                delete_task(task_name)
             job_store.update(job_id, status="CANCELLED")
             return {"job_id": job_id, "status": "cancelled"}
         except TaskSubmissionError as e:

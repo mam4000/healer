@@ -79,3 +79,6 @@ class JobStatusResponse(BaseModel):
     status: str
     result: Optional[JobResult] = None
     error: Optional[str] = None
+    completed_shards: Optional[int] = None
+    total_shards: Optional[int] = None
+    phase: Optional[str] = None

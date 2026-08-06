@@ -18,6 +18,7 @@ source "$CONFIG_FILE"
 : "${BUILDING_BLOCK_BUCKET:?BUILDING_BLOCK_BUCKET is required}"
 : "${BUILDING_BLOCK_PREFIX:?BUILDING_BLOCK_PREFIX is required}"
 : "${BUILDING_BLOCK_MOUNT_PATH:?BUILDING_BLOCK_MOUNT_PATH is required}"
+: "${TASK_QUEUE_MAX_DISPATCHES_PER_SECOND:=13}"
 
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/healer:$(git -C "$ROOT_DIR" rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -74,16 +75,19 @@ else
   gcloud builds submit "$ROOT_DIR" --config="$ROOT_DIR/deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
 fi
 
-COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_MAX_EVALS=2000,HEALER_LIMIT_MAX_PRODUCTS=100,HEALER_LIMIT_MAX_TOTAL=500,HEALER_LIMIT_N_COMP=10,HEALER_LIMIT_RETRO_DEPTH=1"
+COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_MAX_EVALS=2000,HEALER_LIMIT_MAX_PRODUCTS=100,HEALER_LIMIT_MAX_TOTAL=500,HEALER_LIMIT_N_COMP=10,HEALER_LIMIT_RETRO_DEPTH=1,HEALER_TASK_DEADLINE_SECONDS=900"
 BUILDING_BLOCK_ENV="HEALER_DATA_DIR=$BUILDING_BLOCK_MOUNT_PATH"
 BUILDING_BLOCK_VOLUME="mount-path=$BUILDING_BLOCK_MOUNT_PATH,type=cloud-storage,bucket=$BUILDING_BLOCK_BUCKET,readonly=true,mount-options=only-dir=$BUILDING_BLOCK_PREFIX"
 gcloud tasks queues describe "$TASK_QUEUE" --location="$REGION" >/dev/null 2>&1 || \
-  gcloud tasks queues create "$TASK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second=1 --max-attempts=2 --min-backoff=5s
+  gcloud tasks queues create "$TASK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND" --max-attempts=2 --min-backoff=5s
 gcloud tasks queues update "$TASK_QUEUE" --location="$REGION" \
-  --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second=1
+  --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$WEB_SA" --role=roles/cloudtasks.enqueuer >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$WORKER_SA" --role=roles/cloudtasks.enqueuer >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$DISPATCHER_SA" \
   --member="serviceAccount:$WEB_SA" --role=roles/iam.serviceAccountUser >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "$DISPATCHER_SA" \
+  --member="serviceAccount:$WORKER_SA" --role=roles/iam.serviceAccountUser >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$DISPATCHER_SA" \
   --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-cloudtasks.iam.gserviceaccount.com" --role=roles/iam.serviceAccountUser >/dev/null
 
@@ -93,6 +97,8 @@ gcloud run deploy "$TASK_WORKER_SERVICE_NAME" --image="$IMAGE" --region="$REGION
   --add-volume="$BUILDING_BLOCK_VOLUME" --set-env-vars="$COMMON_ENV,$BUILDING_BLOCK_ENV" \
   --set-secrets="HEALER_REDIS_URL=$REDIS_SECRET:latest"
 TASK_WORKER_URL="$(gcloud run services describe "$TASK_WORKER_SERVICE_NAME" --region="$REGION" --format='value(status.url)')"
+gcloud run services update "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
+  --set-env-vars="HEALER_GCP_PROJECT=$PROJECT_ID,HEALER_TASKS_LOCATION=$REGION,HEALER_TASKS_QUEUE=$TASK_QUEUE,HEALER_TASK_WORKER_URL=$TASK_WORKER_URL,HEALER_TASK_DISPATCHER_SERVICE_ACCOUNT=$DISPATCHER_SA"
 gcloud run services add-iam-policy-binding "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
   --member="serviceAccount:$DISPATCHER_SA" --role=roles/run.invoker >/dev/null
 

@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 from rdkit import Chem
 
 from healer.application.healer import MoleculeHEALER, SiteHEALER, FragmentHEALER
+from healer.domain.bb_repository import MOLPORT_FULL_SOURCE
 
 
 logger = logging.getLogger(__name__)
@@ -331,6 +332,69 @@ def run_molecule_enumeration(
     except Exception as e:
         logger.error(f"Error in molecule enumeration: {str(e)}")
         raise
+
+
+def _create_molport_molecule_healer(params: Dict[str, Any]) -> Union[MoleculeHEALER, FragmentHEALER]:
+    """Create and initialise the same molecule healer used by normal requests."""
+    if params.get("bb_source") != MOLPORT_FULL_SOURCE:
+        raise ValueError("Fan-out is only available for Molport Full Database")
+    final_use_fragment_healer = params.get("use_fragment_healer", False) or count_molecular_fragments(params["molecule"]) > 1
+    healer = create_molecule_healer(
+        bb_source=MOLPORT_FULL_SOURCE,
+        reaction_tags=params["reaction_tags"],
+        sim_threshold=params.get("sim_threshold", 0.15),
+        max_bbs_per_frag=params["max_bbs_per_frag"],
+        verbose=1,
+        shuffle_bb_order=params.get("shuffle_bb_order", False),
+        use_fragment_healer=final_use_fragment_healer,
+    )
+    if final_use_fragment_healer:
+        healer.set_query_mol(query_mol=params["molecule"])
+    else:
+        healer.set_query_mol(
+            query_mol=params["molecule"],
+            n_compositions=params.get("n_compositions", 10),
+            randomize_compositions=params.get("randomize_compositions", False),
+            random_seed=params.get("random_seed", -1),
+            custom_split_sites=[params["custom_sites"]] if params.get("custom_sites") else None,
+            retro_tree_depth=params.get("retro_tree_depth", 1),
+            min_frag_size=params.get("min_frag_size", 3),
+        )
+    return healer
+
+
+def run_molport_shard_selection(params: Dict[str, Any], shard_name: str) -> List[List[Dict[str, Any]]]:
+    """Run the bounded selection phase for one named processed SDF shard."""
+    return _create_molport_molecule_healer(params).select_molport_shard_candidates(shard_name)
+
+
+def run_molport_merge(
+    params: Dict[str, Any], shard_candidates: List[List[List[Dict[str, Any]]]]
+) -> List[Dict[str, Any]]:
+    """Merge local shard top-k lists and run normal molecule enumeration once."""
+    healer = _create_molport_molecule_healer(params)
+    max_bbs = params["max_bbs_per_frag"]
+    if not shard_candidates:
+        raise ValueError("No Molport shard results were supplied")
+    fragment_count = len(shard_candidates[0])
+    if any(len(result) != fragment_count for result in shard_candidates):
+        raise ValueError("Molport shard results have inconsistent compositions")
+    merged: List[List[Dict[str, Any]]] = []
+    for fragment_index in range(fragment_count):
+        by_smiles: Dict[str, Dict[str, Any]] = {}
+        for shard_result in shard_candidates:
+            for candidate in shard_result[fragment_index]:
+                previous = by_smiles.get(candidate["smiles"])
+                if previous is None or candidate["score"] > previous["score"]:
+                    by_smiles[candidate["smiles"]] = candidate
+        merged.append(sorted(by_smiles.values(), key=lambda item: (-item["score"], item["smiles"]))[:max_bbs])
+    healer.enumerate_from_molport_candidates(
+        merged,
+        max_evals_per_comp=params.get("max_evals_per_comp"),
+        max_products_per_comp=params.get("max_products_per_comp"),
+        max_total_products=params.get("max_total_products"),
+    )
+    return healer.get_results(as_dict=True, calc_similarity=True, calc_properties=True)
 
 
 def run_site_enumeration(
