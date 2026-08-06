@@ -244,4 +244,5 @@ def test_molport_submission_fans_out_one_task_per_shard(monkeypatch, tmp_path):
     assert len(captured["children"]) == 2
     assert [child[2] for child in captured["children"]] == ["a_processed.sdf", "b_processed.sdf"]
     assert captured["parent"][1]["0"].endswith("/0")
+    assert captured["parent"][3]["max_bbs_per_frag"] == 2
     assert response.job_id == captured["parent"][0]

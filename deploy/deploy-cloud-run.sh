@@ -19,6 +19,7 @@ source "$CONFIG_FILE"
 : "${BUILDING_BLOCK_PREFIX:?BUILDING_BLOCK_PREFIX is required}"
 : "${BUILDING_BLOCK_MOUNT_PATH:?BUILDING_BLOCK_MOUNT_PATH is required}"
 : "${TASK_QUEUE_MAX_DISPATCHES_PER_SECOND:=13}"
+: "${TASK_QUEUE_MAX_ATTEMPTS:=10}"
 
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/healer:$(git -C "$ROOT_DIR" rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -79,9 +80,9 @@ COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_
 BUILDING_BLOCK_ENV="HEALER_DATA_DIR=$BUILDING_BLOCK_MOUNT_PATH"
 BUILDING_BLOCK_VOLUME="mount-path=$BUILDING_BLOCK_MOUNT_PATH,type=cloud-storage,bucket=$BUILDING_BLOCK_BUCKET,readonly=true,mount-options=only-dir=$BUILDING_BLOCK_PREFIX"
 gcloud tasks queues describe "$TASK_QUEUE" --location="$REGION" >/dev/null 2>&1 || \
-  gcloud tasks queues create "$TASK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND" --max-attempts=2 --min-backoff=5s
+  gcloud tasks queues create "$TASK_QUEUE" --location="$REGION" --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND" --max-attempts="$TASK_QUEUE_MAX_ATTEMPTS" --min-backoff=5s
 gcloud tasks queues update "$TASK_QUEUE" --location="$REGION" \
-  --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND"
+  --max-concurrent-dispatches="$TASK_QUEUE_MAX_CONCURRENT_DISPATCHES" --max-dispatches-per-second="$TASK_QUEUE_MAX_DISPATCHES_PER_SECOND" --max-attempts="$TASK_QUEUE_MAX_ATTEMPTS"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$WEB_SA" --role=roles/cloudtasks.enqueuer >/dev/null
 gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$WORKER_SA" --role=roles/cloudtasks.enqueuer >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$DISPATCHER_SA" \

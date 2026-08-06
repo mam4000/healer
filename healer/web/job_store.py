@@ -30,13 +30,18 @@ def create(job_id: str, task_name: str) -> None:
         raise JobStoreUnavailableError("The job store is temporarily unavailable") from exc
 
 
-def create_fanout(job_id: str, shard_tasks: dict[str, str], merge_task_name: str) -> None:
+def create_fanout(
+    job_id: str, shard_tasks: dict[str, str], merge_task_name: str, params: dict[str, Any]
+) -> None:
     """Create the parent state for a bounded Molport fan-out job."""
     job = {
         "status": "PENDING",
         "phase": "SCANNING",
         "task_names": shard_tasks,
         "merge_task_name": merge_task_name,
+        # Retain the already server-limited request for safe task recovery
+        # during the same two-hour result lifetime.
+        "params": params,
         "total_shards": len(shard_tasks),
         "completed_shards": [],
         "shard_results": {},

@@ -11,6 +11,7 @@ import os
 import uuid
 import json
 import io
+import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -62,6 +63,7 @@ else:
 # ============================================================================
 
 _local_jobs: Dict[str, Dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
 
 
 def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
@@ -75,7 +77,8 @@ def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
         str(index): molport_shard_task_name_for(job_id, str(index))
         for index in range(len(shard_names))
     }
-    job_store.create_fanout(job_id, shard_tasks, molport_merge_task_name_for(job_id))
+    logger.warning("Molport fan-out submitted: job=%s shards=%d", job_id, len(shard_names))
+    job_store.create_fanout(job_id, shard_tasks, molport_merge_task_name_for(job_id), params)
     try:
         for index, shard_name in enumerate(shard_names):
             create_molport_shard_task(job_id, str(index), shard_name, params)
