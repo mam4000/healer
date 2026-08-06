@@ -101,7 +101,7 @@ def test_repository_cache_returns_same_object(test_bb_path: str):
     assert repo1 is repo2
 
 
-def test_sharded_repository_streams_one_processed_sdf_at_a_time(tmp_path):
+def test_sharded_repository_streams_one_processed_sdf_at_a_time(tmp_path, caplog):
     """The sharded repository filters while iterating and never needs load()."""
     from rdkit import Chem
 
@@ -124,6 +124,9 @@ def test_sharded_repository_streams_one_processed_sdf_at_a_time(tmp_path):
     assert repo.loaded_count == 0
     assert len(bbs) == 1
     assert bbs[0].get_smiles() == "CCN"
+    assert "Molport shard 1/1 started" in caplog.text
+    assert "Molport shard 1/1 completed" in caplog.text
+    assert "scanned=2, compatible=1" in caplog.text
 
 
 def test_repository_get_bbs_for_all_reactions(test_bb_repository: BBRepository):

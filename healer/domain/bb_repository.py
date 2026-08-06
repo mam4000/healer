@@ -317,16 +317,42 @@ class ShardedBBRepository:
         self, reactions: List[ReactionTemplate21]
     ) -> Iterator[BuildingBlock]:
         reaction_names = {reaction.name for reaction in reactions}
-        for shard_path in self.shard_paths():
-            logger.info("Streaming Molport building-block shard: %s", shard_path.name)
+        shard_paths = self.shard_paths()
+        for shard_number, shard_path in enumerate(shard_paths, start=1):
+            # Use WARNING intentionally: the Cloud Run service currently keeps
+            # application warnings without enabling verbose module logging.
+            logger.warning(
+                "Molport shard %d/%d started: %s",
+                shard_number,
+                len(shard_paths),
+                shard_path.name,
+            )
+            scanned = 0
+            compatible = 0
+            completed = False
             supplier = SDMolSupplier(str(shard_path), sanitize=True)
-            for mol in supplier:
-                if mol is None:
-                    continue
-                bb = BuildingBlock(mol)
-                annotations = bb.get_parsed_prop("rxn_annotations")
-                if isinstance(annotations, dict) and reaction_names.intersection(annotations):
-                    yield bb
+            try:
+                for mol in supplier:
+                    if mol is None:
+                        continue
+                    scanned += 1
+                    bb = BuildingBlock(mol)
+                    annotations = bb.get_parsed_prop("rxn_annotations")
+                    if isinstance(annotations, dict) and reaction_names.intersection(annotations):
+                        compatible += 1
+                        yield bb
+                completed = True
+            finally:
+                state = "completed" if completed else "stopped"
+                logger.warning(
+                    "Molport shard %d/%d %s: %s (scanned=%d, compatible=%d)",
+                    shard_number,
+                    len(shard_paths),
+                    state,
+                    shard_path.name,
+                    scanned,
+                    compatible,
+                )
 
     def get_bbs_for_reactions(
         self, reactions: List[ReactionTemplate21]
