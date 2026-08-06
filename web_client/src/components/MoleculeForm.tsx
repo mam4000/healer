@@ -61,7 +61,7 @@ export function MoleculeForm({ onSubmit, isLoading, isMultiFragment }: MoleculeF
             random_seed: -1,
             retro_tree_depth: 1,
             min_frag_size: 7,
-            max_bbs_per_frag: 0,
+            max_bbs_per_frag: 10,
             shuffle_bb_order: false,
             max_evals_per_comp: 1000,
             max_products_per_comp: 100,
@@ -192,8 +192,8 @@ export function MoleculeForm({ onSubmit, isLoading, isMultiFragment }: MoleculeF
                                 {...form.getInputProps('n_compositions')}
                             />
                             <NumberInput
-                                label={<LabelWithTooltip label="Max BBs per Fragment" tooltip={`Use top N building blocks per fragment instead of similarity threshold. Set 0 to disable.${isServerMode && serverLimits ? ` Server max: ${serverLimits.max_bbs_per_frag}` : ''}`} />}
-                                min={0} 
+                                label={<LabelWithTooltip label="Max BBs per Fragment" tooltip={`Use top N building blocks per fragment instead of similarity threshold.${isServerMode && serverLimits ? ` Server range: 1–${serverLimits.max_bbs_per_frag}` : ' Set 0 to disable.'}`} />}
+                                min={isServerMode ? 1 : 0}
                                 max={isServerMode && serverLimits ? serverLimits.max_bbs_per_frag : 100}
                                 {...form.getInputProps('max_bbs_per_frag')}
                             />

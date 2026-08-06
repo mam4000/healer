@@ -89,7 +89,10 @@ def apply_server_limits(params: Dict[str, Any], healer_type: str = "molecule") -
                                            min(limited['sim_threshold'], SERVER_LIMITS['sim_threshold_max']))
         
         if 'max_bbs_per_frag' in limited:
-            if limited['max_bbs_per_frag'] < 0 or limited['max_bbs_per_frag'] > SERVER_LIMITS['max_bbs_per_frag']:
+            # A streaming catalog cannot safely return an unbounded threshold
+            # result.  In server mode 0, like -1, therefore means use the
+            # bounded shared-service default rather than "unlimited".
+            if limited['max_bbs_per_frag'] <= 0 or limited['max_bbs_per_frag'] > SERVER_LIMITS['max_bbs_per_frag']:
                 limited['max_bbs_per_frag'] = SERVER_LIMITS['max_bbs_per_frag']
         
         if 'n_compositions' in limited:

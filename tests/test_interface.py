@@ -135,6 +135,7 @@ def test_server_limits_cap_omitted_and_excessive_work(monkeypatch):
     assert limited["max_evals_per_comp"] == interface.SERVER_LIMITS["max_evals_per_comp"]
     assert limited["max_products_per_comp"] == interface.SERVER_LIMITS["max_products_per_comp"]
     assert limited["max_total_products"] == interface.SERVER_LIMITS["max_total_products"]
+    assert limited["max_bbs_per_frag"] == interface.SERVER_LIMITS["max_bbs_per_frag"]
     assert limited["n_compositions"] == interface.SERVER_LIMITS["n_compositions_max"]
     assert limited["retro_tree_depth"] == interface.SERVER_LIMITS["retro_depth_max"]
     assert limited["min_frag_size"] == interface.SERVER_LIMITS["min_frag_size_min"]
@@ -144,3 +145,13 @@ def test_server_limits_reject_all_reaction_tag(monkeypatch):
     monkeypatch.setattr(interface, "SERVER_MODE", True)
     with pytest.raises(ValueError, match="unavailable"):
         interface.apply_server_limits({"reaction_tags": ["all"]})
+
+
+def test_server_limits_turn_zero_max_bbs_into_a_bounded_value(monkeypatch):
+    """Zero meant unlimited in the legacy UI but is unsafe for Molport."""
+    monkeypatch.setattr(interface, "SERVER_MODE", True)
+    limited = interface.apply_server_limits({
+        "reaction_tags": ["amide"],
+        "max_bbs_per_frag": 0,
+    })
+    assert limited["max_bbs_per_frag"] == interface.SERVER_LIMITS["max_bbs_per_frag"]
