@@ -2,6 +2,7 @@ import abc
 import heapq
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import List, Union, Dict, Tuple, Any, Optional, Iterator, Iterable
 from itertools import chain, islice
@@ -1151,6 +1152,39 @@ class MoleculeHEALER(_BaseHEALER):
             return []
         frag_sizes = np.array([frag.GetNumHeavyAtoms() for frag in fragments])[:, None]
         frag_fps = self._get_fingerprints(fragments)
+        shard_paths = [path for path in self._bb_repo.shard_paths() if path.name == shard_name]
+        if not shard_paths:
+            raise ValueError(f"Unknown Molport shard: {shard_name}")
+        index = self._bb_repo.open_index(shard_paths[0])
+        if index is not None:
+            started = time.perf_counter()
+            rows = index.eligible_rows(reaction.name for reaction in self.reactions)
+            scores = index.score_rows(frag_fps, frag_sizes.ravel(), rows)
+            selected_rows: List[List[Tuple[float, int, str]]] = [[] for _ in fragments]
+            for fragment_index, score_row in enumerate(scores):
+                pool = selected_rows[fragment_index]
+                by_smiles: Dict[str, int] = {}
+                for row, score in zip(rows, score_row):
+                    smiles = str(index.smiles[int(row)])
+                    existing = by_smiles.get(smiles)
+                    if existing is not None:
+                        if score > pool[existing][0]:
+                            pool[existing] = (float(score), int(row), smiles)
+                        continue
+                    pool.append((float(score), int(row), smiles))
+                    pool.sort(key=lambda item: (-item[0], item[2]))
+                    if len(pool) > self.max_bbs_per_frag:
+                        pool.pop()
+                    by_smiles = {candidate: i for i, (_, _, candidate) in enumerate(pool)}
+            logger.warning(
+                "Molport index selection completed: shard=%s eligible=%d elapsed_seconds=%.3f",
+                shard_name, len(rows), time.perf_counter() - started,
+            )
+            return [
+                [self._serialise_candidate(score, index.building_block(row)) for score, row, _ in pool]
+                for pool in selected_rows
+            ]
+
         selected: List[List[Tuple[float, BuildingBlock]]] = [[] for _ in fragments]
 
         for batch in _chunked(

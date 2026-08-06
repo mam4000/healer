@@ -15,6 +15,7 @@ from rdkit.Chem import SDMolSupplier
 from healer.domain.building_block import BuildingBlock
 from healer.domain.reaction_template import ReactionTemplate21
 from healer.utils.fingerprints import get_fingerprint_generator
+from healer.domain.molport_index import MolportShardIndex
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +313,17 @@ class ShardedBBRepository:
 
     def shard_paths(self) -> List[Path]:
         return sorted(Path(self.source_dir).glob("*_processed.sdf"))
+
+    def open_index(self, shard_path: Path) -> Optional[MolportShardIndex]:
+        """Open a compatible persistent index, or return ``None`` for SDF fallback."""
+        reactions_file = _DATA_DIR / "reactions" / "reactions.json"
+        try:
+            index = MolportShardIndex.open(shard_path, reactions_file)
+        except (OSError, ValueError) as exc:
+            logger.warning("Molport index fallback for %s: %s", shard_path.name, exc)
+            return None
+        logger.info("Molport index loaded for %s (%d records)", shard_path.name, index.manifest["record_count"])
+        return index
 
     def iter_bbs_for_reactions(
         self, reactions: List[ReactionTemplate21], shard_name: Optional[str] = None

@@ -13,6 +13,7 @@ import healer.utils.utils as utils
 from tqdm import tqdm
 from rdkit import Chem
 from rdkit.Chem import SDMolSupplier, ForwardSDMolSupplier
+from healer.domain.molport_index import build_shard_index
 
 # Get reactions path from package data
 _HEALER_PKG = Path(__file__).parent.parent
@@ -186,14 +187,21 @@ def main(input_file: str, output_dir: str = None, verbose: bool = True,
         delayed(_process_batch)(chunk) for chunk in _ichunk(_iter_sdf_records(sdf_file), _CHUNK_SIZE)
     )
     count = 0
-    with open(str(output_file), 'w', buffering=8 * 1024 * 1024) as f:
+    temporary_output = output_file.with_name(output_file.name + '.building')
+    with open(str(temporary_output), 'w', buffering=8 * 1024 * 1024) as f:
         for batch in tqdm(batches, desc="Processing BBs", unit="batch",
                           total=n_chunks, disable=not verbose):
             count += len(batch)
             f.writelines(batch)
 
+    # The SDF is complete before its index is built.  The index manifest is
+    # published last, so request workers can only observe a complete artifact.
+    temporary_output.replace(output_file)
+    index_dir = build_shard_index(output_file, _REACTIONS_FILE)
+
     print(f"Processed {total} molecules, annotated {count} with reactions.")
     print(f"Output written to {output_file}")
+    print(f"Search index written to {index_dir}")
 
 
 def cli():
