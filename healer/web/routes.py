@@ -12,6 +12,7 @@ import uuid
 import json
 import io
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -22,7 +23,19 @@ from pydantic import BaseModel
 from rdkit import Chem
 from rdkit.Chem import rdDepictor, Descriptors, QED
 
-from healer.web.models import MoleculeRequest, SiteRequest, JobSubmitResponse, JobStatusResponse, JobResult
+from healer.web.models import (
+    MoleculeRequest,
+    SiteRequest,
+    BatchMoleculeRequest,
+    BatchSiteRequest,
+    JobSubmitResponse,
+    BatchJobSubmitResponse,
+    BatchStatusRequest,
+    BatchJobProgress,
+    BatchStatusResponse,
+    JobStatusResponse,
+    JobResult,
+)
 from healer.web.interface import (
     SERVER_MODE,
     run_molecule_enumeration,
@@ -65,6 +78,12 @@ else:
 _local_jobs: Dict[str, Dict[str, Any]] = {}
 logger = logging.getLogger(__name__)
 
+# Batch submissions run one job per molecule in the background (local mode only;
+# server mode already dispatches each job asynchronously via Cloud Tasks).
+_local_executor = ThreadPoolExecutor(max_workers=int(os.environ.get("HEALER_LOCAL_WORKERS", "4")))
+
+MAX_BATCH_SIZE = int(os.environ.get("HEALER_MAX_BATCH_SIZE", "50"))
+
 
 def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
     repo = get_repository(MOLPORT_FULL_SOURCE)
@@ -95,7 +114,7 @@ def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
 def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
     """Run a job synchronously and store results."""
     _local_jobs[job_id] = {"status": "STARTED", "result": None, "error": None}
-    
+
     try:
         if job_type == "molecule":
             raw_results = run_molecule_enumeration(**params)
@@ -103,7 +122,7 @@ def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
         else:  # site
             raw_results = run_site_enumeration(**params)
             display_res, complete_res = format_enumeration_results(raw_results, 'site')
-        
+
         _local_jobs[job_id] = {
             "status": "SUCCESS",
             "result": {"display": display_res, "complete": complete_res},
@@ -117,6 +136,32 @@ def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
         }
 
 
+def _run_job_async(job_id: str, job_type: str, params: dict) -> None:
+    """Queue a local-mode job to run in the background so a batch submission
+    doesn't block on every molecule finishing before returning job ids."""
+    _local_jobs[job_id] = {"status": "PENDING", "result": None, "error": None}
+    _local_executor.submit(_run_job_sync, job_id, job_type, params)
+
+
+def _create_server_job(job_type: str, params: dict[str, Any]) -> str:
+    """Submit one job's worth of params as a Cloud Tasks job and return its id."""
+    job_id = str(uuid.uuid4())
+    try:
+        params = apply_server_limits(params, job_type)
+        if job_type == "molecule" and params.get("bb_source") == MOLPORT_FULL_SOURCE:
+            _submit_molport_fanout(job_id, params)
+        else:
+            task_name = task_name_for(job_id)
+            job_store.create(job_id, task_name)
+            create_enumeration_task(job_id, job_type, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (TaskSubmissionError, job_store.JobStoreUnavailableError) as exc:
+        print(f"Unable to submit {job_type} job: {exc!r}; cause={exc.__cause__!r}")
+        raise HTTPException(status_code=503, detail="The job queue is temporarily unavailable") from exc
+    return job_id
+
+
 # ============================================================================
 # Enumeration Endpoints
 # ============================================================================
@@ -126,20 +171,7 @@ async def submit_molecule_enumeration(request: MoleculeRequest):
     params = request.model_dump() if hasattr(request, "model_dump") else request.dict()
 
     if USE_CELERY:
-        try:
-            params = apply_server_limits(params, 'molecule')
-            job_id = str(uuid.uuid4())
-            if params.get("bb_source") == MOLPORT_FULL_SOURCE:
-                _submit_molport_fanout(job_id, params)
-            else:
-                task_name = task_name_for(job_id)
-                job_store.create(job_id, task_name)
-                create_enumeration_task(job_id, 'molecule', params)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except (TaskSubmissionError, job_store.JobStoreUnavailableError) as exc:
-            print(f"Unable to submit molecule job: {exc!r}; cause={exc.__cause__!r}")
-            raise HTTPException(status_code=503, detail="The job queue is temporarily unavailable") from exc
+        job_id = _create_server_job("molecule", params)
         return JobSubmitResponse(job_id=job_id, status="submitted")
     else:
         # Local synchronous mode
@@ -153,23 +185,53 @@ async def submit_site_enumeration(request: SiteRequest):
     params = request.model_dump() if hasattr(request, "model_dump") else request.dict()
 
     if USE_CELERY:
-        try:
-            params = apply_server_limits(params, 'site')
-            job_id = str(uuid.uuid4())
-            task_name = task_name_for(job_id)
-            job_store.create(job_id, task_name)
-            create_enumeration_task(job_id, 'site', params)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except (TaskSubmissionError, job_store.JobStoreUnavailableError) as exc:
-            print(f"Unable to submit site job: {exc!r}; cause={exc.__cause__!r}")
-            raise HTTPException(status_code=503, detail="The job queue is temporarily unavailable") from exc
+        job_id = _create_server_job("site", params)
         return JobSubmitResponse(job_id=job_id, status="submitted")
     else:
         # Local synchronous mode
         job_id = str(uuid.uuid4())
         _run_job_sync(job_id, "site", params)
         return JobSubmitResponse(job_id=job_id, status="submitted")
+
+
+@router.post("/enumerate/molecule/batch", response_model=BatchJobSubmitResponse)
+async def submit_molecule_batch(request: BatchMoleculeRequest):
+    """Submit one enumeration job per SMILES. Jobs run independently — poll
+    GET /jobs/{job_id} for each id to get results as they finish, rather than
+    waiting for the whole batch to complete."""
+    if len(request.molecules) > MAX_BATCH_SIZE:
+        raise HTTPException(status_code=422, detail=f"Batch size exceeds the limit of {MAX_BATCH_SIZE} molecules")
+
+    base_params = request.model_dump(exclude={"molecules"})
+    job_ids = []
+    for smiles in request.molecules:
+        params = {**base_params, "molecule": smiles}
+        if USE_CELERY:
+            job_ids.append(_create_server_job("molecule", params))
+        else:
+            job_id = str(uuid.uuid4())
+            _run_job_async(job_id, "molecule", params)
+            job_ids.append(job_id)
+    return BatchJobSubmitResponse(job_ids=job_ids, status="submitted")
+
+
+@router.post("/enumerate/site/batch", response_model=BatchJobSubmitResponse)
+async def submit_site_batch(request: BatchSiteRequest):
+    """Submit one site-enumeration job per SMILES; see submit_molecule_batch."""
+    if len(request.molecules) > MAX_BATCH_SIZE:
+        raise HTTPException(status_code=422, detail=f"Batch size exceeds the limit of {MAX_BATCH_SIZE} molecules")
+
+    base_params = request.model_dump(exclude={"molecules"})
+    job_ids = []
+    for smiles in request.molecules:
+        params = {**base_params, "molecule": smiles}
+        if USE_CELERY:
+            job_ids.append(_create_server_job("site", params))
+        else:
+            job_id = str(uuid.uuid4())
+            _run_job_async(job_id, "site", params)
+            job_ids.append(job_id)
+    return BatchJobSubmitResponse(job_ids=job_ids, status="submitted")
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
@@ -207,6 +269,31 @@ async def get_job_status(job_id: str):
             response.error = job["error"]
         
         return response
+
+
+@router.post("/jobs/batch-status", response_model=BatchStatusResponse)
+async def get_batch_status(request: BatchStatusRequest):
+    """Return current status for a set of job ids, for driving a batch progress indicator."""
+    jobs = []
+    completed = 0
+    failed = 0
+    for job_id in request.job_ids:
+        if USE_CELERY:
+            try:
+                job = job_store.get(job_id)
+            except job_store.JobStoreUnavailableError as exc:
+                raise HTTPException(status_code=503, detail="The job store is temporarily unavailable") from exc
+        else:
+            job = _local_jobs.get(job_id)
+
+        status = job["status"] if job else "UNKNOWN"
+        if status == "SUCCESS":
+            completed += 1
+        elif status in ("FAILURE", "CANCELLED"):
+            failed += 1
+        jobs.append(BatchJobProgress(job_id=job_id, status=status))
+
+    return BatchStatusResponse(total=len(request.job_ids), completed=completed, failed=failed, jobs=jobs)
 
 
 @router.post("/jobs/{job_id}/cancel")

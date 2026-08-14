@@ -6,8 +6,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from pydantic import BaseModel, Field
 
 
-class MoleculeRequest(BaseModel):
-    molecule: str = Field(..., description="SMILES string of the query molecule")
+class MoleculeParams(BaseModel):
     bb_source: str = Field("test", description="Building block source (e.g., 'test', 'US_stock')")
     reaction_tags: List[str] = Field(
         default=["amide coupling", "amide", "C-N bond formation", "C-N",
@@ -23,20 +22,30 @@ class MoleculeRequest(BaseModel):
     random_seed: int = Field(-1, description="Random seed (-1 for no seed)")
     retro_tree_depth: int = Field(1, description="Depth of retrosynthesis tree")
     min_frag_size: int = Field(3, description="Minimum fragment size")
-    
+
     # New/Renamed fields
     max_bbs_per_frag: int = Field(-1, description="Max building blocks per fragment (-1 for unlimited)")
     shuffle_bb_order: bool = Field(False, description="Shuffle building block order")
-    
+
     # Limits
     max_evals_per_comp: Optional[int] = Field(None, description="Max reaction attempts per composition")
     max_products_per_comp: Optional[int] = Field(None, description="Max products per composition")
     max_total_products: Optional[int] = Field(None, description="Max total products")
-    
+
     use_fragment_healer: bool = Field(False, description="Force use of FragmentHEALER")
 
-class SiteRequest(BaseModel):
+
+class MoleculeRequest(MoleculeParams):
     molecule: str = Field(..., description="SMILES string of the query molecule")
+
+
+class BatchMoleculeRequest(MoleculeParams):
+    molecules: List[str] = Field(
+        ..., min_length=1, description="List of SMILES strings to enumerate, one job per molecule"
+    )
+
+
+class SiteParams(BaseModel):
     bb_source: str = Field("test", description="Building block source")
     reaction_tags: List[str] = Field(
         default=["amide coupling", "amide", "C-N bond formation", "C-N",
@@ -58,17 +67,44 @@ class SiteRequest(BaseModel):
         description="Property rules (min, max)"
     )
     struct_rules: Optional[List[str]] = Field(default=[], description="SMARTS patterns for structure rules")
-    
+
     shuffle_bb_order: bool = Field(False, description="Shuffle building block order")
-    
+
     # Limits
     max_evals_per_comp: Optional[int] = Field(None, description="Max reaction attempts per composition")
     max_products_per_comp: Optional[int] = Field(None, description="Max products per composition")
     max_total_products: Optional[int] = Field(None, description="Max total products")
 
+
+class SiteRequest(SiteParams):
+    molecule: str = Field(..., description="SMILES string of the query molecule")
+
+
+class BatchSiteRequest(SiteParams):
+    molecules: List[str] = Field(
+        ..., min_length=1, description="List of SMILES strings to enumerate, one job per molecule"
+    )
+
 class JobSubmitResponse(BaseModel):
     job_id: str
     status: str
+
+class BatchJobSubmitResponse(BaseModel):
+    job_ids: List[str]
+    status: str
+
+class BatchStatusRequest(BaseModel):
+    job_ids: List[str] = Field(..., min_length=1)
+
+class BatchJobProgress(BaseModel):
+    job_id: str
+    status: str
+
+class BatchStatusResponse(BaseModel):
+    total: int
+    completed: int
+    failed: int
+    jobs: List[BatchJobProgress]
 
 class JobResult(BaseModel):
     display: List[Dict[str, Any]]
