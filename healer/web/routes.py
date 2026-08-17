@@ -9,7 +9,6 @@
 '''
 import os
 import uuid
-import json
 import io
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +16,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from rdkit import Chem
@@ -46,6 +45,7 @@ from healer.web.interface import (
     apply_server_limits,
 )
 from healer.web import job_store
+from healer.web.auth import current_principal, require_principal
 from healer.web.cloud_tasks import (
     TaskSubmissionError,
     create_enumeration_task,
@@ -58,7 +58,7 @@ from healer.web.cloud_tasks import (
 from healer.domain.bb_repository import MOLPORT_FULL_SOURCE, ShardedBBRepository, get_repository
 from healer.utils import utils
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_principal)])
 
 # ============================================================================
 # Mode Detection
@@ -85,7 +85,7 @@ _local_executor = ThreadPoolExecutor(max_workers=int(os.environ.get("HEALER_LOCA
 MAX_BATCH_SIZE = int(os.environ.get("HEALER_MAX_BATCH_SIZE", "50"))
 
 
-def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
+def _submit_molport_fanout(job_id: str, params: dict[str, Any], owner: str) -> None:
     repo = get_repository(MOLPORT_FULL_SOURCE)
     if not isinstance(repo, ShardedBBRepository):
         raise RuntimeError("Molport repository is not configured as a sharded source")
@@ -97,7 +97,7 @@ def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
         for index in range(len(shard_names))
     }
     logger.warning("Molport fan-out submitted: job=%s shards=%d", job_id, len(shard_names))
-    job_store.create_fanout(job_id, shard_tasks, molport_merge_task_name_for(job_id), params)
+    job_store.create_fanout(job_id, shard_tasks, molport_merge_task_name_for(job_id), params, owner)
     try:
         for index, shard_name in enumerate(shard_names):
             create_molport_shard_task(job_id, str(index), shard_name, params)
@@ -111,9 +111,9 @@ def _submit_molport_fanout(job_id: str, params: dict[str, Any]) -> None:
         raise
 
 
-def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
+def _run_job_sync(job_id: str, job_type: str, params: dict, owner: str = "standalone:local") -> None:
     """Run a job synchronously and store results."""
-    _local_jobs[job_id] = {"status": "STARTED", "result": None, "error": None}
+    _local_jobs[job_id] = {"status": "STARTED", "result": None, "error": None, "owner": owner}
 
     try:
         if job_type == "molecule":
@@ -127,32 +127,34 @@ def _run_job_sync(job_id: str, job_type: str, params: dict) -> None:
             "status": "SUCCESS",
             "result": {"display": display_res, "complete": complete_res},
             "error": None,
+            "owner": owner,
         }
     except Exception as e:
         _local_jobs[job_id] = {
             "status": "FAILURE",
             "result": None,
             "error": str(e),
+            "owner": owner,
         }
 
 
-def _run_job_async(job_id: str, job_type: str, params: dict) -> None:
+def _run_job_async(job_id: str, job_type: str, params: dict, owner: str = "standalone:local") -> None:
     """Queue a local-mode job to run in the background so a batch submission
     doesn't block on every molecule finishing before returning job ids."""
-    _local_jobs[job_id] = {"status": "PENDING", "result": None, "error": None}
-    _local_executor.submit(_run_job_sync, job_id, job_type, params)
+    _local_jobs[job_id] = {"status": "PENDING", "result": None, "error": None, "owner": owner}
+    _local_executor.submit(_run_job_sync, job_id, job_type, params, owner)
 
 
-def _create_server_job(job_type: str, params: dict[str, Any]) -> str:
+def _create_server_job(job_type: str, params: dict[str, Any], owner: str) -> str:
     """Submit one job's worth of params as a Cloud Tasks job and return its id."""
     job_id = str(uuid.uuid4())
     try:
         params = apply_server_limits(params, job_type)
         if job_type == "molecule" and params.get("bb_source") == MOLPORT_FULL_SOURCE:
-            _submit_molport_fanout(job_id, params)
+            _submit_molport_fanout(job_id, params, owner)
         else:
             task_name = task_name_for(job_id)
-            job_store.create(job_id, task_name)
+            job_store.create(job_id, task_name, owner)
             create_enumeration_task(job_id, job_type, params)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -160,6 +162,12 @@ def _create_server_job(job_type: str, params: dict[str, Any]) -> str:
         print(f"Unable to submit {job_type} job: {exc!r}; cause={exc.__cause__!r}")
         raise HTTPException(status_code=503, detail="The job queue is temporarily unavailable") from exc
     return job_id
+
+
+def _require_job_owner(job: dict[str, Any]) -> None:
+    """Hide jobs from other principals, including callers who guessed a UUID."""
+    if job.get("owner") != current_principal().owner_key:
+        raise HTTPException(status_code=404, detail="Job not found")
 
 
 # ============================================================================
@@ -171,12 +179,12 @@ async def submit_molecule_enumeration(request: MoleculeRequest):
     params = request.model_dump() if hasattr(request, "model_dump") else request.dict()
 
     if USE_CELERY:
-        job_id = _create_server_job("molecule", params)
+        job_id = _create_server_job("molecule", params, current_principal().owner_key)
         return JobSubmitResponse(job_id=job_id, status="submitted")
     else:
         # Local synchronous mode
         job_id = str(uuid.uuid4())
-        _run_job_sync(job_id, "molecule", params)
+        _run_job_sync(job_id, "molecule", params, current_principal().owner_key)
         return JobSubmitResponse(job_id=job_id, status="submitted")
 
 
@@ -185,12 +193,12 @@ async def submit_site_enumeration(request: SiteRequest):
     params = request.model_dump() if hasattr(request, "model_dump") else request.dict()
 
     if USE_CELERY:
-        job_id = _create_server_job("site", params)
+        job_id = _create_server_job("site", params, current_principal().owner_key)
         return JobSubmitResponse(job_id=job_id, status="submitted")
     else:
         # Local synchronous mode
         job_id = str(uuid.uuid4())
-        _run_job_sync(job_id, "site", params)
+        _run_job_sync(job_id, "site", params, current_principal().owner_key)
         return JobSubmitResponse(job_id=job_id, status="submitted")
 
 
@@ -207,10 +215,10 @@ async def submit_molecule_batch(request: BatchMoleculeRequest):
     for smiles in request.molecules:
         params = {**base_params, "molecule": smiles}
         if USE_CELERY:
-            job_ids.append(_create_server_job("molecule", params))
+            job_ids.append(_create_server_job("molecule", params, current_principal().owner_key))
         else:
             job_id = str(uuid.uuid4())
-            _run_job_async(job_id, "molecule", params)
+            _run_job_async(job_id, "molecule", params, current_principal().owner_key)
             job_ids.append(job_id)
     return BatchJobSubmitResponse(job_ids=job_ids, status="submitted")
 
@@ -226,10 +234,10 @@ async def submit_site_batch(request: BatchSiteRequest):
     for smiles in request.molecules:
         params = {**base_params, "molecule": smiles}
         if USE_CELERY:
-            job_ids.append(_create_server_job("site", params))
+            job_ids.append(_create_server_job("site", params, current_principal().owner_key))
         else:
             job_id = str(uuid.uuid4())
-            _run_job_async(job_id, "site", params)
+            _run_job_async(job_id, "site", params, current_principal().owner_key)
             job_ids.append(job_id)
     return BatchJobSubmitResponse(job_ids=job_ids, status="submitted")
 
@@ -243,6 +251,7 @@ async def get_job_status(job_id: str):
             raise HTTPException(status_code=503, detail="The job store is temporarily unavailable") from exc
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
+        _require_job_owner(job)
         response = JobStatusResponse(
             job_id=job_id,
             status=job["status"],
@@ -261,6 +270,7 @@ async def get_job_status(job_id: str):
             raise HTTPException(status_code=404, detail="Job not found")
         
         job = _local_jobs[job_id]
+        _require_job_owner(job)
         response = JobStatusResponse(job_id=job_id, status=job["status"])
         
         if job["status"] == "SUCCESS":
@@ -286,6 +296,8 @@ async def get_batch_status(request: BatchStatusRequest):
         else:
             job = _local_jobs.get(job_id)
 
+        if job and job.get("owner") != current_principal().owner_key:
+            job = None
         status = job["status"] if job else "UNKNOWN"
         if status == "SUCCESS":
             completed += 1
@@ -304,6 +316,7 @@ async def cancel_job(job_id: str):
             job = job_store.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail="Job not found")
+            _require_job_owner(job)
             task_names = list(job.get("task_names", {}).values())
             if "task_name" in job:
                 task_names.append(job["task_name"])
@@ -320,6 +333,7 @@ async def cancel_job(job_id: str):
         # Local mode - can't really cancel synchronous jobs
         # But we can mark it as cancelled if it exists
         if job_id in _local_jobs:
+            _require_job_owner(_local_jobs[job_id])
             _local_jobs[job_id]["status"] = "CANCELLED"
             return {"job_id": job_id, "status": "cancelled", "note": "Local mode - job may have already completed"}
         raise HTTPException(status_code=400, detail="Cannot cancel jobs in local mode")
@@ -350,13 +364,17 @@ async def get_available_building_blocks():
 async def download_job_results(job_id: str):
     if USE_CELERY:
         job = job_store.get(job_id)
-        if job is None or job["status"] != 'SUCCESS':
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        _require_job_owner(job)
+        if job["status"] != 'SUCCESS':
             raise HTTPException(status_code=400, detail="Job not completed or failed")
         results = job["result"].get('complete', [])
     else:
         if job_id not in _local_jobs:
             raise HTTPException(status_code=404, detail="Job not found")
         job = _local_jobs[job_id]
+        _require_job_owner(job)
         if job["status"] != "SUCCESS":
             raise HTTPException(status_code=400, detail="Job not completed or failed")
         results = job["result"].get('complete', [])

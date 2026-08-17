@@ -6,6 +6,11 @@ so jobs run synchronously and results are available immediately after the POST.
 """
 import os
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import time
 import pytest
 
 # Force local mode before any healer imports so the routes module sees the
@@ -13,7 +18,6 @@ import pytest
 os.environ.setdefault("HEALER_SERVER_MODE", "false")
 
 from fastapi.testclient import TestClient
-from fastapi import HTTPException
 
 from healer.web.app import app
 import healer.web.routes as routes
@@ -144,6 +148,27 @@ def test_job_not_found(client: TestClient):
     assert resp.status_code == 404
 
 
+def _chemquery_headers(subject: str) -> dict[str, str]:
+    claims = {"sub": subject, "email": f"{subject}@example.test", "tenant_id": "tenant-a", "exp": int(time.time()) + 60}
+    payload = base64.urlsafe_b64encode(json.dumps(claims, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    signature = hmac.new(b"test-shared-secret", payload.encode(), hashlib.sha256).hexdigest()
+    return {"X-Healer-Caller": payload, "X-Healer-Caller-Signature": signature}
+
+
+def test_signed_chemquery_context_enforces_job_ownership(client: TestClient, monkeypatch):
+    """A job reference cannot be used by a different ChemQuery principal."""
+    monkeypatch.setenv("HEALER_AUTH_MODE", "iap")
+    monkeypatch.setenv("HEALER_CHEMQUERY_SHARED_SECRET", "test-shared-secret")
+    routes._local_jobs["owned-job"] = {
+        "status": "SUCCESS",
+        "result": {"display": [], "complete": []},
+        "error": None,
+        "owner": "tenant-a:alice",
+    }
+    assert client.get("/api/jobs/owned-job", headers=_chemquery_headers("alice")).status_code == 200
+    assert client.get("/api/jobs/owned-job", headers=_chemquery_headers("bob")).status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Site enumeration — success path
 # ---------------------------------------------------------------------------
@@ -209,7 +234,7 @@ def test_server_submission_applies_limits_before_task_creation(monkeypatch):
     })
 
     response = asyncio.run(routes.submit_molecule_enumeration(MoleculeRequest(
-        molecule="CCO", reaction_tags=["amide"], max_total_products=None,
+        molecule="CCO", bb_source="test", reaction_tags=["amide"], max_total_products=None,
     )))
 
     assert response.job_id == captured["job_id"]

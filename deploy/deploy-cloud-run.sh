@@ -14,12 +14,14 @@ fi
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
 : "${PROJECT_ID:?PROJECT_ID is required}"
-: "${ALLOWED_USERS:?ALLOWED_USERS is required}"
 : "${BUILDING_BLOCK_BUCKET:?BUILDING_BLOCK_BUCKET is required}"
 : "${BUILDING_BLOCK_PREFIX:?BUILDING_BLOCK_PREFIX is required}"
 : "${BUILDING_BLOCK_MOUNT_PATH:?BUILDING_BLOCK_MOUNT_PATH is required}"
 : "${TASK_QUEUE_MAX_DISPATCHES_PER_SECOND:=13}"
 : "${TASK_QUEUE_MAX_ATTEMPTS:=10}"
+: "${IAP_JWT_AUDIENCE:?IAP_JWT_AUDIENCE is required}"
+: "${CHEMQUERY_RUNTIME_SERVICE_ACCOUNT:?CHEMQUERY_RUNTIME_SERVICE_ACCOUNT is required}"
+: "${CHEMQUERY_SHARED_SECRET_NAME:?CHEMQUERY_SHARED_SECRET_NAME is required}"
 
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/healer:$(git -C "$ROOT_DIR" rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -64,6 +66,12 @@ for SERVICE_ACCOUNT in "$WEB_SA" "$WORKER_SA"; do
   gcloud storage buckets add-iam-policy-binding "gs://$BUILDING_BLOCK_BUCKET" \
     --member="serviceAccount:$SERVICE_ACCOUNT" --role=roles/storage.objectViewer >/dev/null
 done
+gcloud secrets describe "$CHEMQUERY_SHARED_SECRET_NAME" >/dev/null 2>&1 || {
+  echo "Missing shared ChemQuery/HEALER secret $CHEMQUERY_SHARED_SECRET_NAME. Create it before deployment." >&2
+  exit 2
+}
+gcloud secrets add-iam-policy-binding "$CHEMQUERY_SHARED_SECRET_NAME" --member="serviceAccount:$WEB_SA" \
+  --role=roles/secretmanager.secretAccessor >/dev/null
 
 # A public Git URL lets Cloud Build fetch the checked-in source directly on
 # Google infrastructure, avoiding a local source-archive upload.  Keep the
@@ -76,7 +84,7 @@ else
   gcloud builds submit "$ROOT_DIR" --config="$ROOT_DIR/deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
 fi
 
-COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_MAX_EVALS=2000,HEALER_LIMIT_MAX_PRODUCTS=100,HEALER_LIMIT_MAX_TOTAL=500,HEALER_LIMIT_N_COMP=10,HEALER_LIMIT_RETRO_DEPTH=1,HEALER_TASK_DEADLINE_SECONDS=900"
+COMMON_ENV="HEALER_SERVER_MODE=true,HEALER_RESULT_TTL_SECONDS=7200,HEALER_LIMIT_MAX_EVALS=2000,HEALER_LIMIT_MAX_PRODUCTS=100,HEALER_LIMIT_MAX_TOTAL=500,HEALER_LIMIT_N_COMP=10,HEALER_LIMIT_RETRO_DEPTH=1,HEALER_TASK_DEADLINE_SECONDS=900,HEALER_AUTH_MODE=iap,HEALER_IAP_JWT_AUDIENCE=$IAP_JWT_AUDIENCE"
 BUILDING_BLOCK_ENV="HEALER_DATA_DIR=$BUILDING_BLOCK_MOUNT_PATH"
 BUILDING_BLOCK_VOLUME="mount-path=$BUILDING_BLOCK_MOUNT_PATH,type=cloud-storage,bucket=$BUILDING_BLOCK_BUCKET,readonly=true,mount-options=only-dir=$BUILDING_BLOCK_PREFIX"
 gcloud tasks queues describe "$TASK_QUEUE" --location="$REGION" >/dev/null 2>&1 || \
@@ -103,23 +111,20 @@ gcloud run services update "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
 gcloud run services add-iam-policy-binding "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
   --member="serviceAccount:$DISPATCHER_SA" --role=roles/run.invoker >/dev/null
 
-gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$REGION" --no-allow-unauthenticated --iap \
+gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$REGION" --no-allow-unauthenticated --ingress=internal-and-cloud-load-balancing \
   --service-account="$WEB_SA" --network="$NETWORK" --subnet="$SUBNET" --vpc-egress=private-ranges-only \
   --cpu=2 --memory=4Gi --concurrency=1 --max-instances=4 --timeout=60 --add-volume="$BUILDING_BLOCK_VOLUME" \
   --set-env-vars="$COMMON_ENV,$BUILDING_BLOCK_ENV,HEALER_GCP_PROJECT=$PROJECT_ID,HEALER_TASKS_LOCATION=$REGION,HEALER_TASKS_QUEUE=$TASK_QUEUE,HEALER_TASK_WORKER_URL=$TASK_WORKER_URL,HEALER_TASK_DISPATCHER_SERVICE_ACCOUNT=$DISPATCHER_SA" \
   --startup-probe=httpGet.path=/api/health,httpGet.port=8080,timeoutSeconds=10,periodSeconds=10,failureThreshold=3 \
-  --set-secrets="HEALER_REDIS_URL=$REDIS_SECRET:latest"
+  --set-secrets="HEALER_REDIS_URL=$REDIS_SECRET:latest,HEALER_CHEMQUERY_SHARED_SECRET=$CHEMQUERY_SHARED_SECRET_NAME:latest"
 
 gcloud beta services identity create --service=iap.googleapis.com --project="$PROJECT_ID" >/dev/null
 gcloud run services add-iam-policy-binding "$SERVICE_NAME" --region="$REGION" \
   --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com" --role=roles/run.invoker >/dev/null
 
-echo "IAP is enabled. For projects without a Google Cloud organization, complete the one-time custom OAuth client setup in the Cloud Run console before opening the service."
+gcloud run services add-iam-policy-binding "$SERVICE_NAME" --region="$REGION" \
+  --member="serviceAccount:$CHEMQUERY_RUNTIME_SERVICE_ACCOUNT" --role=roles/run.invoker >/dev/null
 
-IFS=',' read -r -a USERS <<< "$ALLOWED_USERS"
-for USER_EMAIL in "${USERS[@]}"; do
-  gcloud iap web add-iam-policy-binding --member="user:$USER_EMAIL" --role=roles/iap.httpsResourceAccessor \
-    --region="$REGION" --resource-type=cloud-run --service="$SERVICE_NAME"
-done
+echo "HEALER is ready for the shared load balancer. Enable IAP on its load-balancer backend service and assign the same IAP policy as ChemQuery."
 
 gcloud run services describe "$SERVICE_NAME" --region="$REGION" --format='value(status.url)'

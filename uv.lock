@@ -1507,6 +1507,7 @@ opt = [
 ]
 web = [
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "google-cloud-tasks" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1517,6 +1518,7 @@ requires-dist = [
     { name = "baybe", extras = ["chem"], marker = "extra == 'opt'" },
     { name = "dotenv" },
     { name = "fastapi", marker = "extra == 'web'" },
+    { name = "google-auth", marker = "extra == 'web'" },
     { name = "google-cloud-tasks", marker = "extra == 'web'" },
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "joblib" },

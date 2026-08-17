@@ -38,6 +38,7 @@ web = [
     "uvicorn[standard]",
     "redis",
     "google-cloud-tasks",
+    "google-auth",
 ]
 opt = [
     "pygad",

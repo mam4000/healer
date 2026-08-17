@@ -23,15 +23,15 @@ def _key(job_id: str) -> str:
     return f"{KEY_PREFIX}{job_id}"
 
 
-def create(job_id: str, task_name: str) -> None:
+def create(job_id: str, task_name: str, owner: str) -> None:
     try:
-        _client().set(_key(job_id), json.dumps({"status": "PENDING", "task_name": task_name}), ex=RESULT_TTL_SECONDS)
+        _client().set(_key(job_id), json.dumps({"status": "PENDING", "task_name": task_name, "owner": owner}), ex=RESULT_TTL_SECONDS)
     except RedisError as exc:
         raise JobStoreUnavailableError("The job store is temporarily unavailable") from exc
 
 
 def create_fanout(
-    job_id: str, shard_tasks: dict[str, str], merge_task_name: str, params: dict[str, Any]
+    job_id: str, shard_tasks: dict[str, str], merge_task_name: str, params: dict[str, Any], owner: str
 ) -> None:
     """Create the parent state for a bounded Molport fan-out job."""
     job = {
@@ -46,6 +46,7 @@ def create_fanout(
         "completed_shards": [],
         "shard_results": {},
         "merge_claimed": False,
+        "owner": owner,
     }
     try:
         _client().set(_key(job_id), json.dumps(job), ex=RESULT_TTL_SECONDS)
