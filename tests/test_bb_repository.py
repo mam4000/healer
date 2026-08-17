@@ -94,6 +94,28 @@ def test_repository_loads_building_blocks(test_bb_repository: BBRepository):
     assert len(test_bb_repository) > 0
 
 
+def test_building_block_uses_molport_url_when_standard_url_is_absent():
+    """Molport stores supplier links under PUBCHEM_EXT_SUBSTANCE_URL."""
+    from rdkit import Chem
+    from healer.domain.building_block import BuildingBlock
+
+    mol = Chem.MolFromSmiles("CCN")
+    mol.SetProp("PUBCHEM_EXT_SUBSTANCE_URL", "https://www.molport.com/shop/compound/Molport-000-002-223")
+
+    assert BuildingBlock(mol).get_url() == "https://www.molport.com/shop/compound/Molport-000-002-223"
+
+
+def test_building_block_prefers_standard_url():
+    from rdkit import Chem
+    from healer.domain.building_block import BuildingBlock
+
+    mol = Chem.MolFromSmiles("CCN")
+    mol.SetProp("URL", "https://example.com/standard")
+    mol.SetProp("PUBCHEM_EXT_SUBSTANCE_URL", "https://www.molport.com/shop/compound/Molport-000-002-223")
+
+    assert BuildingBlock(mol).get_url() == "https://example.com/standard"
+
+
 def test_repository_cache_returns_same_object(test_bb_path: str):
     """Calling get_repository twice with the same path returns the same cached object."""
     repo1 = get_repository(test_bb_path)

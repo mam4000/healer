@@ -598,9 +598,7 @@ class _BaseHEALER(abc.ABC):
                     r.reaction_names[i] if i < len(r.reaction_names) else ""
                 )
             for i in range(max_bb):
-                row[f"URL{i+1}"] = (
-                    r.bbs[i].get_parsed_prop('URL') if i < len(r.bbs) else ""
-                )
+                row[f"URL{i+1}"] = r.bbs[i].get_url() if i < len(r.bbs) else ""
             row = {**row, **r.props}  # Add any additional properties
             rows.append(row)
 

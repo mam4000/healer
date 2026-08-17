@@ -47,6 +47,14 @@ class BuildingBlock:
         '''
         return self.props.get(name, '')
 
+    def get_url(self) -> str:
+        """Return the supplier URL, including Molport's source field."""
+        for property_name in ("URL", "PUBCHEM_EXT_SUBSTANCE_URL"):
+            value = self.get_parsed_prop(property_name)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
     @property
     def mol(self) -> Chem.Mol:
         '''
