@@ -26,7 +26,7 @@ def test_molecule_request_minimal():
     """Only 'molecule' is required; all other fields take their defaults."""
     req = MoleculeRequest(molecule="CCO")
     assert req.molecule == "CCO"
-    assert req.bb_source == "test"
+    assert req.bb_source == "molport_full"
     assert req.sim_threshold == 0.15
     assert req.retro_tree_depth == 1
     assert req.min_frag_size == 3
@@ -93,7 +93,7 @@ def test_molecule_request_custom_sites_optional():
 def test_site_request_minimal():
     req = SiteRequest(molecule="CCO")
     assert req.molecule == "CCO"
-    assert req.bb_source == "test"
+    assert req.bb_source == "molport_full"
     assert req.reactive_sites is None
     assert req.rules is not None  # default rules are set
 

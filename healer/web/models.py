@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class MoleculeParams(BaseModel):
-    bb_source: str = Field("test", description="Building block source (e.g., 'test', 'US_stock')")
+    bb_source: str = Field("molport_full", description="Building block source (e.g., 'molport_full', 'US_stock')")
     reaction_tags: List[str] = Field(
         default=["amide coupling", "amide", "C-N bond formation", "C-N",
                  "alkylation", "N-arylation", "azole", "amination"],
@@ -46,7 +46,7 @@ class BatchMoleculeRequest(MoleculeParams):
 
 
 class SiteParams(BaseModel):
-    bb_source: str = Field("test", description="Building block source")
+    bb_source: str = Field("molport_full", description="Building block source")
     reaction_tags: List[str] = Field(
         default=["amide coupling", "amide", "C-N bond formation", "C-N",
                  "alkylation", "N-arylation", "azole", "amination"],

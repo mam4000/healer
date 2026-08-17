@@ -31,7 +31,7 @@ export function MoleculeForm({ onSubmit, isLoading, isMultiFragment }: MoleculeF
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [reactionTags, setReactionTags] = useState<string[]>(DEFAULT_REACTION_TAGS);
     const [bbSources, setBbSources] = useState<BuildingBlockOption[]>([
-        { value: 'test_100_bb_processed.sdf', label: 'Test Set (100 BBs)' }
+        { value: 'molport_full', label: 'Molport Full Database' }
     ]);
     const [serverLimits, setServerLimits] = useState<ServerLimits | null>(null);
     const [isServerMode, setIsServerMode] = useState(false);
@@ -53,7 +53,7 @@ export function MoleculeForm({ onSubmit, isLoading, isMultiFragment }: MoleculeF
     
     const form = useForm({
         initialValues: {
-            bb_source: 'test_100_bb_processed.sdf',
+            bb_source: 'molport_full',
             reaction_tags: DEFAULT_REACTION_TAGS as string[],
             sim_threshold: 0.50,
             n_compositions: 10,

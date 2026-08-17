@@ -31,7 +31,7 @@ export function SiteForm({ onSubmit, isLoading }: SiteFormProps) {
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [reactionTags, setReactionTags] = useState<string[]>(DEFAULT_REACTION_TAGS);
     const [bbSources, setBbSources] = useState<BuildingBlockOption[]>([
-        { value: 'test_100_bb_processed.sdf', label: 'Test Set (100 BBs)' }
+        { value: 'molport_full', label: 'Molport Full Database' }
     ]);
     const [serverLimits, setServerLimits] = useState<ServerLimits | null>(null);
     const [isServerMode, setIsServerMode] = useState(false);
@@ -53,7 +53,7 @@ export function SiteForm({ onSubmit, isLoading }: SiteFormProps) {
     
     const form = useForm({
         initialValues: {
-            bb_source: 'test_100_bb_processed.sdf',
+            bb_source: 'molport_full',
             reaction_tags: DEFAULT_REACTION_TAGS,
             reactive_sites_str: '',
             struct_rules_str: '',
