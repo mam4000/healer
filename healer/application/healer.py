@@ -625,7 +625,7 @@ class _BaseHEALER(abc.ABC):
             profile_df.rename(columns={'smiles': 'Product'}, inplace=True)
             df = df.merge(profile_df, how='left', on='Product', validate='m:1')
 
-        df.insert(0, "ID", [f"HEAL_{i:06d}" for i in df.index])
+        df.insert(0, "ID", [f"{i:06d}" for i in df.index])
         if as_dict:
             return df.to_dict(orient="records")
         return df

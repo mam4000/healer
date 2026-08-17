@@ -202,8 +202,9 @@ def test_site_healer_pipeline(site_healer: SiteHEALER):
 
 
 def test_site_healer_id_column(site_healer: SiteHEALER):
-    """Every result row has an ID in the expected HEAL_XXXXXX format."""
+    """Every result row has a zero-padded numeric identifier."""
     results = site_healer.get_results(as_dict=True, calc_similarity=False, calc_properties=False)
     for row in results:
         assert "ID" in row
-        assert row["ID"].startswith("HEAL_")
+        assert row["ID"].isdigit()
+        assert len(row["ID"]) == 6
