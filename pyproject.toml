@@ -59,6 +59,7 @@ Repository = "https://github.com/eneskelestemur/healer"
 healer        = "healer.cli:main"
 healer-ui     = "healer.web.app:start"
 preprocess-bb = "healer.scripts.preprocess_bb_source:cli"
+rebuild-molport-indexes = "healer.scripts.rebuild_molport_indexes:main"
 
 [tool.setuptools.packages.find]
 where   = ["."]

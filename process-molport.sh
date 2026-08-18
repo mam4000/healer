@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-bcquery}"
 REGION="${REGION:-us-west1}"
-BUCKET="${BUCKET:-healer_data}"
+BUCKET="${BUCKET:-healer_data_2}"
 
 # These are the paths created when the prior job extracted the Molport ZIP.
 INPUT_PREFIX="${INPUT_PREFIX:-Molport_Full_Database/All Stock Compounds}"

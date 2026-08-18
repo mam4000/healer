@@ -69,6 +69,12 @@ async def molport_shard_task(request: MolportShardTask):
     try:
         candidates = run_molport_shard_selection(request.params, request.shard_name)
     except Exception as exc:
+        logger.exception(
+            "Molport shard selection failed: job=%s shard=%s shard_name=%s",
+            request.job_id,
+            request.shard_id,
+            request.shard_name,
+        )
         job_store.record_shard_failure(request.job_id, request.shard_id)
         raise HTTPException(status_code=500, detail="Molport shard selection failed") from exc
     queue_merge = job_store.record_shard_success(request.job_id, request.shard_id, candidates)

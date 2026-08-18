@@ -985,17 +985,19 @@ class MoleculeHEALER(_BaseHEALER):
         '''
             Return a loggable string representation of the compositions.
         '''
+        if not self._compositions:
+            return 'No compositions found.'
         if isinstance(self._compositions[0], CompositionPath):
             return '\n'.join(
                 f'Composition {i+1} fragments: {[Chem.MolToSmiles(frag) for frag in comp.fragments]}'
                 for i, comp in enumerate(self._compositions)
-            ) if self._compositions else 'No compositions found.'
+            )
         
         elif isinstance(self._compositions[0], CompositionWithBBs):
             return '\n'.join(
                 f'Composition {i+1} fragments: {[Chem.MolToSmiles(frag) for frag in comp.comp.fragments]}'
                 for i, comp in enumerate(self._compositions)
-            ) if self._compositions else 'No compositions found.'
+            )
         
         else:
             raise TypeError(
@@ -1132,6 +1134,56 @@ class MoleculeHEALER(_BaseHEALER):
             bb.SetProp(name, value)
         return bb
 
+    @staticmethod
+    def _top_unique_index_rows(index, rows: np.ndarray, scores: np.ndarray, limit: int) -> List[Tuple[float, int, str]]:
+        """Return the exact, deterministic top-k distinct-SMILES index rows.
+
+        Numeric selection keeps the hot path in NumPy.  SMILES are read only
+        for a small over-sampled frontier; ties at the final score are expanded
+        so ordering remains identical to the previous exhaustive Python loop.
+        """
+        if not len(rows) or limit <= 0:
+            return []
+        frontier_size = min(len(rows), max(limit * 4, 256))
+        while True:
+            positions = np.argpartition(-scores, frontier_size - 1)[:frontier_size]
+            frontier_rows = rows[positions]
+            frontier_scores = scores[positions]
+            order = np.lexsort((frontier_rows, index.smiles[frontier_rows], -frontier_scores))
+            unique_count = len({str(index.smiles[int(row)]) for row in frontier_rows[order]})
+            if unique_count >= limit or frontier_size == len(rows):
+                break
+            frontier_size = min(len(rows), frontier_size * 2)
+
+        # Scores at the boundary may have been excluded by argpartition.  They
+        # must be included to apply the existing score-then-SMILES tie break.
+        seen: set[str] = set()
+        provisional = []
+        for position in order:
+            row = int(frontier_rows[position])
+            smiles = str(index.smiles[row])
+            if smiles not in seen:
+                seen.add(smiles)
+                provisional.append((float(frontier_scores[position]), row, smiles))
+                if len(provisional) == limit:
+                    break
+        cutoff = provisional[-1][0]
+        positions = np.flatnonzero(scores >= cutoff)
+        candidate_rows = rows[positions]
+        candidate_scores = scores[positions]
+        order = np.lexsort((candidate_rows, index.smiles[candidate_rows], -candidate_scores))
+        selected: List[Tuple[float, int, str]] = []
+        seen.clear()
+        for position in order:
+            row = int(candidate_rows[position])
+            smiles = str(index.smiles[row])
+            if smiles not in seen:
+                seen.add(smiles)
+                selected.append((float(candidate_scores[position]), row, smiles))
+                if len(selected) == limit:
+                    break
+        return selected
+
     def select_molport_shard_candidates(self, shard_name: str, bb_chunk_size: int = 1000) -> List[List[Dict[str, Any]]]:
         """Select deterministic local top-k candidates for one Molport shard.
 
@@ -1157,23 +1209,13 @@ class MoleculeHEALER(_BaseHEALER):
         if index is not None:
             started = time.perf_counter()
             rows = index.eligible_rows(reaction.name for reaction in self.reactions)
-            scores = index.score_rows(frag_fps, frag_sizes.ravel(), rows)
-            selected_rows: List[List[Tuple[float, int, str]]] = [[] for _ in fragments]
-            for fragment_index, score_row in enumerate(scores):
-                pool = selected_rows[fragment_index]
-                by_smiles: Dict[str, int] = {}
-                for row, score in zip(rows, score_row):
-                    smiles = str(index.smiles[int(row)])
-                    existing = by_smiles.get(smiles)
-                    if existing is not None:
-                        if score > pool[existing][0]:
-                            pool[existing] = (float(score), int(row), smiles)
-                        continue
-                    pool.append((float(score), int(row), smiles))
-                    pool.sort(key=lambda item: (-item[0], item[2]))
-                    if len(pool) > self.max_bbs_per_frag:
-                        pool.pop()
-                    by_smiles = {candidate: i for i, (_, _, candidate) in enumerate(pool)}
+            selected_rows = [
+                self._top_unique_index_rows(
+                    index, rows, index.score_row(query_fp, float(frag_sizes[fragment_index, 0]), rows),
+                    self.max_bbs_per_frag,
+                )
+                for fragment_index, query_fp in enumerate(frag_fps)
+            ]
             logger.warning(
                 "Molport index selection completed: shard=%s eligible=%d elapsed_seconds=%.3f",
                 shard_name, len(rows), time.perf_counter() - started,

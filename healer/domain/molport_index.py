@@ -24,7 +24,7 @@ from healer.domain.building_block import BuildingBlock
 from healer.utils.fingerprints import get_fingerprint_generator
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 FINGERPRINT_SPEC = {"type": "morgan", "radius": 3, "fp_size": 2048, "include_chirality": True}
 _BYTE_POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
 
@@ -99,6 +99,11 @@ def build_shard_index(shard_path: str | Path, reactions_file: str | Path) -> Pat
     np.save(destination / "heavy_atoms.npy", np.asarray(heavy_atoms, dtype=np.uint16), allow_pickle=False)
     fp_array = np.vstack(fingerprints).astype(np.uint8, copy=False) if fingerprints else np.empty((0, width), dtype=np.uint8)
     np.save(destination / "fingerprints.npy", fp_array, allow_pickle=False)
+    # This value is used in every Tversky denominator.  Keeping it alongside
+    # the packed fingerprints avoids a second complete popcount pass per
+    # request.
+    fingerprint_counts = _BYTE_POPCOUNT[fp_array].sum(axis=1, dtype=np.uint16)
+    np.save(destination / "fingerprint_counts.npy", fingerprint_counts, allow_pickle=False)
 
     reaction_names = sorted(reaction_rows)
     offsets = [0]
@@ -140,6 +145,7 @@ class MolportShardIndex:
     props: np.ndarray
     heavy_atoms: np.ndarray
     fingerprints: np.ndarray
+    fingerprint_counts: np.ndarray
     reaction_offsets: np.ndarray
     reaction_rows: np.ndarray
 
@@ -158,22 +164,23 @@ class MolportShardIndex:
             and manifest.get("reaction_catalog_sha256") == _reaction_catalog_checksum(Path(reactions_file))
             and manifest.get("source_name") == shard.name
             and manifest.get("source_size") == stat.st_size
-            and manifest.get("source_mtime_ns") == stat.st_mtime_ns
         )
-        # Size/mtime are the inexpensive freshness check on every request.  A
-        # full checksum is available for catalog-audit deployments without
-        # turning every worker cold start into another full shard read.
+        # GCS-FUSE can expose an mtime that differs from the one observed by
+        # the indexing job for the same immutable object, so it is not a
+        # reliable serving-time freshness signal.  Size is cheap to check; a
+        # full checksum remains available for catalog-audit deployments.
         if os.getenv("HEALER_MOLPORT_VERIFY_INDEX_CHECKSUM") == "1":
             valid = valid and manifest.get("source_sha256") == _sha256(shard)
         if not valid:
             raise ValueError("index manifest is incompatible or stale")
         try:
             arrays = [np.load(root / name, mmap_mode="r", allow_pickle=False) for name in (
-                "smiles.npy", "props.npy", "heavy_atoms.npy", "fingerprints.npy", "reaction_offsets.npy", "reaction_rows.npy")]
+                "smiles.npy", "props.npy", "heavy_atoms.npy", "fingerprints.npy", "fingerprint_counts.npy",
+                "reaction_offsets.npy", "reaction_rows.npy")]
         except (OSError, ValueError) as exc:
             raise ValueError("index arrays are unreadable") from exc
         count = manifest.get("record_count")
-        if any(len(array) != count for array in arrays[:4]):
+        if any(len(array) != count for array in arrays[:5]):
             raise ValueError("index arrays have inconsistent record counts")
         return cls(shard, root, manifest, *arrays)
 
@@ -197,21 +204,33 @@ class MolportShardIndex:
             bb.SetProp(name, value)
         return bb
 
+    def score_row(
+        self, query_fp: Any, fragment_size: float, rows: np.ndarray, chunk_size: int = 50_000
+    ) -> np.ndarray:
+        """Score one fragment exactly, with bounded temporary memory."""
+        scores = np.empty(len(rows), dtype=np.float64)
+        if not len(rows):
+            return scores
+        query = np.frombuffer(DataStructs.BitVectToBinaryText(query_fp), dtype=np.uint8)
+        query_count = int(_BYTE_POPCOUNT[query].sum())
+        for start in range(0, len(rows), chunk_size):
+            stop = min(start + chunk_size, len(rows))
+            chunk_rows = rows[start:stop]
+            packed = self.fingerprints[chunk_rows]
+            common = _BYTE_POPCOUNT[np.bitwise_and(packed, query)].sum(axis=1)
+            stock_counts = self.fingerprint_counts[chunk_rows]
+            denominator = 0.95 * query_count + 0.05 * stock_counts
+            similarity = np.divide(
+                common, denominator, out=np.zeros_like(common, dtype=np.float64), where=denominator != 0
+            )
+            bb_sizes = self.heavy_atoms[chunk_rows].astype(np.float64)
+            weights = 1 - np.clip(bb_sizes - fragment_size, 0, None) / bb_sizes
+            scores[start:stop] = weights * similarity
+        return scores
+
     def score_rows(self, query_fps: list, fragment_sizes: np.ndarray, rows: np.ndarray) -> np.ndarray:
         """Return exact current weighted Tversky scores without RDKit candidate objects."""
-        if not len(rows):
-            return np.empty((len(query_fps), 0), dtype=np.float64)
-        packed = self.fingerprints[rows]
-        stock_counts = _BYTE_POPCOUNT[packed].sum(axis=1)
-        bb_sizes = self.heavy_atoms[rows].astype(np.float64)
-        scores = np.empty((len(query_fps), len(rows)), dtype=np.float64)
-        for index, query_fp in enumerate(query_fps):
-            query = np.frombuffer(DataStructs.BitVectToBinaryText(query_fp), dtype=np.uint8)
-            common = _BYTE_POPCOUNT[np.bitwise_and(packed, query)].sum(axis=1)
-            query_count = _BYTE_POPCOUNT[query].sum()
-            denominator = 0.95 * query_count + 0.05 * stock_counts
-            similarity = np.divide(common, denominator, out=np.zeros_like(common, dtype=np.float64), where=denominator != 0)
-            delta = bb_sizes - float(fragment_sizes[index])
-            weights = 1 - np.clip(delta, 0, None) / bb_sizes
-            scores[index] = weights * similarity
-        return scores
+        return np.vstack([
+            self.score_row(query_fp, float(fragment_sizes[index]), rows)
+            for index, query_fp in enumerate(query_fps)
+        ]) if query_fps else np.empty((0, len(rows)), dtype=np.float64)

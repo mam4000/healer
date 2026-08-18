@@ -26,6 +26,11 @@ from tests.conftest import PENICILLIN_SMILES, ASPIRIN_SMILES
 # MoleculeHEALER
 # ---------------------------------------------------------------------------
 
+def test_composition_prints_handles_no_compositions():
+    healer = object.__new__(MoleculeHEALER)
+    healer._compositions = []
+    assert healer._composition_prints() == "No compositions found."
+
 @pytest.fixture(scope="module")
 def molecule_healer(test_bb_repository: BBRepository) -> MoleculeHEALER:
     """

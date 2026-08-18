@@ -23,7 +23,7 @@ source "$CONFIG_FILE"
 : "${CHEMQUERY_RUNTIME_SERVICE_ACCOUNT:?CHEMQUERY_RUNTIME_SERVICE_ACCOUNT is required}"
 : "${CHEMQUERY_SHARED_SECRET_NAME:?CHEMQUERY_SHARED_SECRET_NAME is required}"
 
-IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/healer:$(git -C "$ROOT_DIR" rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
+IMAGE="${DEPLOY_IMAGE:-$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/healer:$(git -C "$ROOT_DIR" rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)}"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 WEB_SA="$WEB_SERVICE_ACCOUNT@$PROJECT_ID.iam.gserviceaccount.com"
 WORKER_SA="$WORKER_SERVICE_ACCOUNT@$PROJECT_ID.iam.gserviceaccount.com"
@@ -76,7 +76,9 @@ gcloud secrets add-iam-policy-binding "$CHEMQUERY_SHARED_SECRET_NAME" --member="
 # A public Git URL lets Cloud Build fetch the checked-in source directly on
 # Google infrastructure, avoiding a local source-archive upload.  Keep the
 # local mode as a useful fallback for private, unpushed work.
-if [[ -n "${BUILD_SOURCE_REPOSITORY:-}" ]]; then
+if [[ -n "${DEPLOY_IMAGE:-}" ]]; then
+  echo "Reusing requested deployment image: $IMAGE"
+elif [[ -n "${BUILD_SOURCE_REPOSITORY:-}" ]]; then
   gcloud builds submit "$BUILD_SOURCE_REPOSITORY" \
     --git-source-revision="${BUILD_SOURCE_REVISION:-main}" \
     --config="deploy/cloudbuild.yaml" --substitutions="_IMAGE=$IMAGE"
@@ -111,11 +113,14 @@ gcloud run services update "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
 gcloud run services add-iam-policy-binding "$TASK_WORKER_SERVICE_NAME" --region="$REGION" \
   --member="serviceAccount:$DISPATCHER_SA" --role=roles/run.invoker >/dev/null
 
+# GCS FUSE mounting can consume the first several probe intervals on a cold
+# instance.  Allow one minute so a healthy application is not rejected before
+# Uvicorn starts listening.
 gcloud run deploy "$SERVICE_NAME" --image="$IMAGE" --region="$REGION" --no-allow-unauthenticated --ingress=internal-and-cloud-load-balancing \
   --service-account="$WEB_SA" --network="$NETWORK" --subnet="$SUBNET" --vpc-egress=private-ranges-only \
   --cpu=2 --memory=4Gi --concurrency=1 --max-instances=4 --timeout=60 --add-volume="$BUILDING_BLOCK_VOLUME" \
   --set-env-vars="$COMMON_ENV,$BUILDING_BLOCK_ENV,HEALER_GCP_PROJECT=$PROJECT_ID,HEALER_TASKS_LOCATION=$REGION,HEALER_TASKS_QUEUE=$TASK_QUEUE,HEALER_TASK_WORKER_URL=$TASK_WORKER_URL,HEALER_TASK_DISPATCHER_SERVICE_ACCOUNT=$DISPATCHER_SA" \
-  --startup-probe=httpGet.path=/api/health,httpGet.port=8080,timeoutSeconds=10,periodSeconds=10,failureThreshold=3 \
+  --startup-probe=httpGet.path=/api/health,httpGet.port=8080,timeoutSeconds=10,periodSeconds=10,failureThreshold=6 \
   --set-secrets="HEALER_REDIS_URL=$REDIS_SECRET:latest,HEALER_CHEMQUERY_SHARED_SECRET=$CHEMQUERY_SHARED_SECRET_NAME:latest"
 
 gcloud beta services identity create --service=iap.googleapis.com --project="$PROJECT_ID" >/dev/null
