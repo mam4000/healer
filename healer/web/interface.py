@@ -81,8 +81,13 @@ def apply_server_limits(params: Dict[str, Any], healer_type: str = "molecule") -
 
     tags = [tag for tag in limited.get('reaction_tags', []) if tag.strip()]
     if any(tag.lower() == 'all' for tag in tags):
-        raise ValueError("The 'all' reaction tag is unavailable in server mode")
-    limited['reaction_tags'] = tags[:SERVER_LIMITS['max_reaction_tags']]
+        # Safe to allow with retro_tree_depth capped at 1 (below): tree size is
+        # O(b^d) with d=1, so trying every template is linear in template count,
+        # not exponential. Bounded further downstream by max_evals_per_comp,
+        # max_products_per_comp, and max_total_products regardless of tag count.
+        limited['reaction_tags'] = ['all']
+    else:
+        limited['reaction_tags'] = tags[:SERVER_LIMITS['max_reaction_tags']]
     
     if healer_type in ('molecule', 'fragment'):
         if 'sim_threshold' in limited:

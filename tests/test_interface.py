@@ -141,10 +141,13 @@ def test_server_limits_cap_omitted_and_excessive_work(monkeypatch):
     assert limited["min_frag_size"] == interface.SERVER_LIMITS["min_frag_size_min"]
 
 
-def test_server_limits_reject_all_reaction_tag(monkeypatch):
+def test_server_limits_allow_all_reaction_tag_unbounded(monkeypatch):
+    """'all' is safe with retro_tree_depth capped at 1 (linear, not exponential
+    in template count), so it passes through instead of being truncated."""
     monkeypatch.setattr(interface, "SERVER_MODE", True)
-    with pytest.raises(ValueError, match="unavailable"):
-        interface.apply_server_limits({"reaction_tags": ["all"]})
+    limited = interface.apply_server_limits({"reaction_tags": ["all"], "retro_tree_depth": 1})
+    assert limited["reaction_tags"] == ["all"]
+    assert limited["retro_tree_depth"] == interface.SERVER_LIMITS["retro_depth_max"]
 
 
 def test_server_limits_turn_zero_max_bbs_into_a_bounded_value(monkeypatch):
